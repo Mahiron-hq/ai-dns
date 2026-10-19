@@ -62,10 +62,10 @@ Describe 'Test-ServiceAccess for Cloudflare services' {
     }
 
     It 'reports <Case>' -ForEach @(
-        @{ Case = 'an SNI reset'; Fields = @{ TlsOk = $false; Error = [AiDns.ProbeError]::TlsReset }; Reason = 'TlsBlocked' }
-        @{ Case = 'a forged certificate'; Fields = @{ TlsOk = $false; Error = [AiDns.ProbeError]::CertificateInvalid; Detail = 'RemoteCertificateNameMismatch' }; Reason = 'TlsForged' }
+        @{ Case = 'an SNI reset'; Fields = @{ TlsOk = $false; Error = 'TlsReset' }; Reason = 'TlsBlocked' }
+        @{ Case = 'a forged certificate'; Fields = @{ TlsOk = $false; Error = 'CertificateInvalid'; Detail = 'RemoteCertificateNameMismatch' }; Reason = 'TlsForged' }
         @{ Case = 'a DPI stall'; Fields = @{ Stalled = $true; Status = 200; Detail = '16 KB' }; Reason = 'Stalled' }
-        @{ Case = 'an unreachable proxy'; Fields = @{ TcpOk = $false; TlsOk = $false; Error = [AiDns.ProbeError]::ConnectTimeout }; Reason = 'Unreachable' }
+        @{ Case = 'an unreachable proxy'; Fields = @{ TcpOk = $false; TlsOk = $false; Error = 'ConnectTimeout' }; Reason = 'Unreachable' }
     ) {
         $subject = New-TestCase -Responses @{ 'chatgpt.com/cdn-cgi/trace' = $Fields; 'chatgpt.com/' = $script:Ok200 }
         (Test-Service 'chatgpt' $subject).Reason | Should -Be $Reason

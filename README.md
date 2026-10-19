@@ -143,7 +143,7 @@ The automated tests in `tests/*.Tests.ps1` use [Pester 5](https://pester.dev) an
 network settings:
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser
+Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Scope CurrentUser
 Invoke-Pester -Path .\tests
 ```
 
@@ -291,7 +291,7 @@ Astracat, Mafioznik, XyZ DNS, Bez mezhau, WebShift DNS, Xbox DNS, общий п�
 трогают:
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser
+Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Scope CurrentUser
 Invoke-Pester -Path .\tests
 ```
 

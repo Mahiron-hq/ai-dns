@@ -15,7 +15,7 @@ BeforeAll {
     # Builds a response to an A query for $Name with the given answer addresses, using name compression.
     function New-DnsResponse([int] $Id, [string] $Name, [string[]] $Answers = @(), [int] $RCode = 0) {
         $packet = [Collections.Generic.List[byte]]::new()
-        $packet.AddRange([byte[]]@(($Id -shr 8) -band 0xFF, $Id -band 0xFF, 0x81, (0x80 -bor $RCode), 0, 1, 0, $Answers.Count, 0, 0, 0, 0))
+        $packet.AddRange([byte[]]@((($Id -shr 8) -band 0xFF), ($Id -band 0xFF), 0x81, (0x80 -bor $RCode), 0, 1, 0, $Answers.Count, 0, 0, 0, 0))
         $packet.AddRange((ConvertTo-DnsName $Name))
         $packet.AddRange([byte[]]@(0, 1, 0, 1))
         foreach ($answer in $Answers) {
@@ -69,11 +69,14 @@ Describe 'DnsWire.Parse and Classify' {
         ($actual -join ',') | Should -Be ($Usable -join ',')
     }
 
-    It 'returns null for <Case>' -ForEach @(
-        @{ Case = 'a packet shorter than the header'; Bytes = [byte[]]@(1, 2, 3) }
-        @{ Case = 'a query instead of a response'; Bytes = [AiDns.DnsWire]::BuildQuery('ya.ru', 1) }
-    ) {
-        [AiDns.DnsWire]::Parse($Bytes, 0, $Bytes.Length) | Should -BeNullOrEmpty
+    It 'returns null for a packet shorter than the header' {
+        $bytes = [byte[]]@(1, 2, 3)
+        [AiDns.DnsWire]::Parse($bytes, 0, $bytes.Length) | Should -BeNullOrEmpty
+    }
+
+    It 'returns null for a query instead of a response' {
+        $bytes = [AiDns.DnsWire]::BuildQuery('ya.ru', 1)
+        [AiDns.DnsWire]::Parse($bytes, 0, $bytes.Length) | Should -BeNullOrEmpty
     }
 
     It 'stops on a compression pointer loop instead of hanging' {

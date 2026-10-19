@@ -46,8 +46,8 @@ jobs:
       - name: Run tests
         shell: powershell
         run: |
-          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
-          Import-Module Pester -MinimumVersion 5.5.0
+          Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99
           $config = New-PesterConfiguration
           $config.Run.Path = 'tests'
           $config.Run.Exit = $true
