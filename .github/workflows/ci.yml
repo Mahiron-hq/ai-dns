@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Static analysis
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $findings = Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+          $findings | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize -Wrap
+          if ($findings) { exit 1 }
+
+      - name: Compile the probe engine (C# 5, .NET Framework)
+        shell: powershell
+        run: |
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" -nologo -target:library -warnaserror+ `
+            "-out:$env:RUNNER_TEMP\probe.dll" src\Probe.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate the provider catalog
+        shell: pwsh
+        run: |
+          $json = Get-Content src/providers.json -Raw
+          $schema = Get-Content src/providers.schema.json -Raw
+          if (-not (Test-Json -Json $json -Schema $schema)) { exit 1 }
+
+  test:
+    name: Pester (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run tests
+        shell: powershell
+        run: |
+          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module Pester -MinimumVersion 5.5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          Invoke-Pester -Configuration $config

@@ -1,0 +1,9 @@
+# Logs written by the trace and dry-run copies in tests/manual.
+tests/manual/logs/
+
+# Pester and editor output.
+testResults.xml
+coverage.xml
+.vs/
+.vscode/
+*.tmp
