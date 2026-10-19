@@ -206,7 +206,9 @@ function Invoke-AiDns {
         Show-AiDnsBanner $Action
         Write-RunHeader $PSBoundParameters
 
-        $keepLogs = $Trace -or $explicitLog
+        # Logs inside the data directory survive its removal only when the run was asked to keep a log.
+        $logsInData = $script:Run.LogDirectory.StartsWith($script:Paths.Root, [StringComparison]::OrdinalIgnoreCase)
+        $keepLogs = $logsInData -and ($Trace -or $explicitLog)
         $output = @(switch ($Action) {
             'Enable'  { Invoke-AiDnsEnable -TestOnly:$TestOnly -Offline:$Offline }
             'Disable' { (Invoke-AiDnsDisable -Full:$Full -ResetNetwork:$ResetNetwork -EnableIPv6:$EnableIPv6 -KeepLogs:$keepLogs).ExitCode }
