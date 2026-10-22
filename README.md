@@ -2,9 +2,9 @@
 
 # ai-dns
 
-**Find a working smart DNS for ChatGPT, Claude and Gemini with a double click, and roll it back exactly**
-<br>
 **Подбор рабочего smart DNS для ChatGPT, Claude и Gemini двойным щелчком с точным откатом**
+<br>
+**Find a working smart DNS for ChatGPT, Claude and Gemini with a double click, and roll it back exactly**
 
 [![Release](https://img.shields.io/github/v/release/Mahiron-hq/ai-dns?style=flat-square&label=release)](https://github.com/Mahiron-hq/ai-dns/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/Mahiron-hq/ai-dns/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/Mahiron-hq/ai-dns/actions/workflows/ci.yml)
@@ -13,205 +13,9 @@
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE?style=flat-square&logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square)](#)
 
-**[English](#-english)** · **[Русский](#-русский)**
+**[Русский](#-русский)** · **[English](#-english)**
 
 </div>
-
----
-
-## 🇬🇧 English
-
-A smart DNS answers requests for geo-restricted services with the address of its own proxy, so
-ChatGPT, Claude and Gemini see the proxy's region instead of yours. There are many such resolvers
-and they come and go. ai-dns tests all known resolvers in a few seconds, checks every service through
-the proxy it actually returns and applies the best one. The settings that existed before the first
-change are saved and restored exactly.
-
-> **Before you start.** A resolver you set as system DNS sees every domain you visit. DNS changes the
-> region a service sees, not your account: an account that was blocked stays blocked. When the
-> provider resets TLS connections by site name (DPI filtering), no DNS can help, and ai-dns says so.
-
-### Installation
-
-1. Download `ai-dns-<version>.zip` from the [latest release](https://github.com/Mahiron-hq/ai-dns/releases/latest).
-2. Right-click the ZIP, open **Properties**, tick **Unblock** and press **OK**. Without this, Windows
-   asks for confirmation before every `.bat` file.
-3. Extract the archive to a folder that will stay where it is, for example `C:\Tools\ai-dns`.
-4. Double-click `AI-DNS-Enable.bat` and allow administrator rights.
-5. Restart the browser.
-
-Run `AI-DNS-Enable.bat` again whenever a service stops opening, or `AI-DNS-Update.bat` to start over
-from a clean state. The window closes 20 seconds after success; press any key to close it earlier.
-
-**New version.** When a new release is out, ai-dns mentions it once, before Enable, Disable or Update
-start, and offers to open the download page. Extract the new archive into the same folder and replace
-the files: your `settings.json` is not part of the archive and stays as it is.
-
-**Uninstall.** Run `AI-DNS-Disable.bat`, then delete the folder.
-
-### Scripts
-
-| Script | What it does |
-|---|---|
-| `AI-DNS-Enable.bat` | Tests the resolvers, applies the best one with a fallback and verifies the result |
-| `AI-DNS-Disable.bat` | Restores the saved settings and removes every trace of ai-dns |
-| `AI-DNS-Update.bat` | Full rollback, then removes the cached lists and compiled engine, then selects a resolver from scratch with freshly downloaded lists |
-| `AI-DNS-Settings.bat` | Opens the settings menu: required services, own domains, default switches and more |
-
-### Settings
-
-`AI-DNS-Settings.bat` opens a menu that works with the arrow keys, `Enter`, `Space`, `Del` and
-`Esc`; the digits jump to an item. Every change is saved at once to `settings.json` next to the
-scripts. Disable and Update never touch this file.
-
-| Section | What can be changed |
-|---|---|
-| Services and domains | The mode of every service: **Required**, **Preferred** or **Not checked**. By default ChatGPT and Claude are required, everything else is preferred. Own domains are added here |
-| Default switches | `-TestOnly`, `-DryRun`, `-Trace`, `-Offline`, `-Full`, `-EnableIPv6` and `-ResetNetwork`, turned on for every run of the actions that accept them |
-| What Enable may change | IPv6 on the adapters, browser secure DNS, `hosts` entries, NRPT routing and Windows DoH templates, each can be left alone. Disable always reverts all of them |
-| DNS servers | Own smart DNS addresses, excluded providers and addresses, and a pinned provider that becomes the primary whenever it opens every required service |
-| Language, log and window | Console language, the log folder, how long the window stays open after success and the new version notice |
-| Check status | Shows the configured DNS and NRPT rules and checks every service through the system resolver. Changes nothing and needs no administrator rights |
-| Run | Enable, test without changes, Update or Disable with the current settings |
-
-**Service modes.** A resolver set is chosen only if it opens every **required** service, by the primary
-resolver itself or through an NRPT route. **Preferred** services count towards the choice. A service that
-is **not checked** is ignored.
-
-**Own domains.** Any site can be added, for example `perplexity.ai`. The domain is validated when it is
-added: it must be a valid name, must not overlap a built-in service and must have an address in DNS. It
-is added as required and checked strictly: the DNS answer, a valid certificate, a complete page, and
-HTTP 403 or 451 counts as blocked (a Cloudflare bot challenge does not). If no resolver opens a
-required service, Enable says which one is to blame and offers to remove it, or make it preferred, and
-continue at once without probing again. The menu marks such a service and removes it with one key.
-
-### From PowerShell
-
-```powershell
-.\AI-DNS.ps1 -Action Enable -TestOnly      # rank the resolvers, change nothing
-.\AI-DNS.ps1 -Action Enable                # apply the best resolver
-.\AI-DNS.ps1 -Action Update                # roll back, clear caches, enable from scratch
-.\AI-DNS.ps1 -Action Disable -Full         # roll back and clean up as much as possible
-.\AI-DNS.ps1 -Action Status                # show the configuration and check every service
-.\AI-DNS.ps1 -Action Settings              # open the settings menu
-```
-
-The `.bat` files pass their arguments through, so `AI-DNS-Enable.bat -TestOnly` also works. Switches
-given here are added to the default switches from the settings.
-
-### Options
-
-| Option | Applies to | Effect |
-|---|---|---|
-| `-TestOnly` | Enable | Rank the resolvers and stop without changing anything |
-| `-DryRun` | Enable, Disable, Update | Perform every check, but only log the changes instead of making them |
-| `-Trace` | all | Log every DNS query, HTTPS check and change with its state before and after |
-| `-Offline` | Enable, Update | Do not download provider lists; use the bundled list and the cache |
-| `-Full` | Disable, Update | Reset all adapters to DHCP, delete the commented-out hosts entries, remove the data directory even after errors |
-| `-EnableIPv6` | Disable, Update | Enable IPv6 on every adapter, not only where ai-dns turned it off |
-| `-ResetNetwork` | Disable | Also reset Winsock and TCP/IP; a restart is required |
-| `-Language en\|ru` | all | Console language; by default it comes from the settings, then from the Windows UI language |
-| `-LogDirectory <path>` | all | Where to write the log; the default is the settings, then `%ProgramData%\AIDNS\logs` |
-| `-NoWait` | all | Close the window as soon as the action finishes |
-| `-NoUpdateCheck` | Enable, Disable, Update | Do not look for a new release before starting |
-
-### How it works
-
-1. **Provider lists.** The bundled [`src/providers.json`](src/providers.json) is merged with two
-   remote lists: this repository's own `providers.json` and the community list of
-   [DnsSwitch](https://github.com/WhIteGh0s1/DnsSwitch). Each is downloaded from GitHub with a
-   jsDelivr mirror, cached for 6 hours, and the old copy is used when a download fails. Entries that
-   share an address or host are folded into one provider. Own servers from the settings are added.
-2. **Discovery.** The current addresses of every provider are resolved from its host names and DoH
-   host names through public resolvers, so a provider that moves to new servers is still found.
-3. **Reference answers.** Every service is resolved through Yandex, Google and Cloudflare DNS to know
-   its real addresses and tell a proxy from a direct answer.
-4. **DNS poll.** All candidates are queried in one batch from a single UDP socket. The whole poll is
-   bounded by two 1.5 s rounds, however many resolvers are dead.
-5. **HTTPS checks.** Each service is opened through the address the resolver returned: the
-   Cloudflare region from `/cdn-cgi/trace`, the answers of the OpenAI, Anthropic and Gemini APIs to a
-   dummy key, transfers that stall half-way (DPI throttling), TLS resets by site name and forged
-   certificates. Certificates are always validated; nothing is sent over an unvalidated connection.
-6. **Selection.** Resolvers are ranked by the services they open, a required service outweighing all
-   preferred ones together, then by DNS and TLS latency. The best resolver that opens every required
-   service becomes the primary, the next one that opens the same services becomes the secondary.
-   Services the primary cannot open are routed to another resolver through NRPT.
-7. **Application and verification.** After the changes below, the DNS cache is flushed and every
-   service is checked again through the system resolver, exactly as applications see it.
-
-If no resolver works, nothing is applied, and an adapter that still points at a dead smart DNS is
-returned to its original resolvers.
-
-### What changes on the system
-
-| Setting | Enable | Disable |
-|---|---|---|
-| IPv4 DNS of physical adapters with a gateway | primary + secondary resolver | the saved servers, or DHCP |
-| IPv6 on those adapters | turned off, so ISP AAAA answers cannot bypass the proxy | turned back on where ai-dns turned it off |
-| NRPT rules (comment `AIDNS`) | per-service routing when needed | removed |
-| Windows DoH templates (Windows 11) | added for resolvers that serve DoH, with UDP fallback | removed |
-| Chrome, Edge, Brave and Firefox policies | built-in secure DNS off | the saved values are written back |
-| `hosts` entries for the checked services | commented out with `# AIDNS-disabled:` | uncommented (deleted with `-Full`) |
-| `%ProgramData%\AIDNS` | backup, state, cache, logs | removed |
-
-Each row except the first and the last can be switched off in the settings. The backup is written once,
-before the first change, and repeated enables never overwrite it. VPN and virtual adapters are not
-touched. The data directory is restricted to administrators, because it holds a compiled assembly
-loaded by an elevated process and the backup that drives registry restores. Backups written by
-version 2.x are read as well.
-
-### Providers
-
-The bundled list contains Comss.one, GeoHide (Russia, EU, US), Zapret DNS, DNS-AI, Malw.link,
-Astracat, Mafioznik, XyZ DNS, Bez mezhau, WebShift DNS, Xbox DNS, a community pool of gateways and
-the Iranian anti-sanction resolvers Shecan, Begzar and Electro: 57 addresses in total. Resolvers that
-do not answer or do not open any service are filtered out automatically, so the list errs on the side
-of completeness.
-
-To add or update a provider, edit [`src/providers.json`](src/providers.json). The format is described
-by [`src/providers.schema.json`](src/providers.schema.json) and checked in CI. Every installed copy
-picks up the change from the repository within 6 hours, without a new release.
-
-### Testing
-
-`tests/manual` contains copies of the three scripts for manual testing. Every copy writes a detailed
-log to `tests/manual/logs`:
-
-| Copy | Changes settings | Log |
-|---|---|---|
-| `AI-DNS-*-Trace.bat` | yes | every query, check and change with before and after state |
-| `AI-DNS-*-DryRun.bat` | no, changes are only logged | the same, with `[dry run]` for each skipped change |
-
-The automated tests in `tests/*.Tests.ps1` use [Pester 5](https://pester.dev) and never touch
-network settings:
-
-```powershell
-Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Scope CurrentUser
-Invoke-Pester -Path .\tests
-```
-
-### For maintainers
-
-| Tool | What it does |
-|---|---|
-| `tools\Build-Release.ps1` | Builds `dist\ai-dns-<version>.zip` with only the files needed to run ai-dns, plus its SHA-256 checksum. Every file must be committed |
-| `tools\Record-Demo.ps1 -LogPath <log>` | Renders the demo GIF in `docs\` from the log of a real run. Nothing is executed; the DNS in use before the run, VPN warnings and log paths are removed. Needs Python 3 with Pillow |
-
-### Requirements
-
-- Windows 10 or 11 (Home included)
-- Windows PowerShell 5.1 and .NET Framework 4.7 or later (both ship with Windows)
-- An administrator account
-
-### Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | Success; for Status, every required service works |
-| 1 | Failure, details are shown in the window and the log |
-| 2 | No resolver set opens the required services; nothing was changed |
-| 3 | Finished with problems, see the warnings; for Status, a required service does not work |
-| 1223 | The elevation prompt was cancelled, nothing was changed |
 
 ---
 
@@ -415,6 +219,202 @@ Invoke-Pester -Path .\tests
 
 ---
 
-## License / Лицензия
+## 🇬🇧 English
+
+A smart DNS answers requests for geo-restricted services with the address of its own proxy, so
+ChatGPT, Claude and Gemini see the proxy's region instead of yours. There are many such resolvers
+and they come and go. ai-dns tests all known resolvers in a few seconds, checks every service through
+the proxy it actually returns and applies the best one. The settings that existed before the first
+change are saved and restored exactly.
+
+> **Before you start.** A resolver you set as system DNS sees every domain you visit. DNS changes the
+> region a service sees, not your account: an account that was blocked stays blocked. When the
+> provider resets TLS connections by site name (DPI filtering), no DNS can help, and ai-dns says so.
+
+### Installation
+
+1. Download `ai-dns-<version>.zip` from the [latest release](https://github.com/Mahiron-hq/ai-dns/releases/latest).
+2. Right-click the ZIP, open **Properties**, tick **Unblock** and press **OK**. Without this, Windows
+   asks for confirmation before every `.bat` file.
+3. Extract the archive to a folder that will stay where it is, for example `C:\Tools\ai-dns`.
+4. Double-click `AI-DNS-Enable.bat` and allow administrator rights.
+5. Restart the browser.
+
+Run `AI-DNS-Enable.bat` again whenever a service stops opening, or `AI-DNS-Update.bat` to start over
+from a clean state. The window closes 20 seconds after success; press any key to close it earlier.
+
+**New version.** When a new release is out, ai-dns mentions it once, before Enable, Disable or Update
+start, and offers to open the download page. Extract the new archive into the same folder and replace
+the files: your `settings.json` is not part of the archive and stays as it is.
+
+**Uninstall.** Run `AI-DNS-Disable.bat`, then delete the folder.
+
+### Scripts
+
+| Script | What it does |
+|---|---|
+| `AI-DNS-Enable.bat` | Tests the resolvers, applies the best one with a fallback and verifies the result |
+| `AI-DNS-Disable.bat` | Restores the saved settings and removes every trace of ai-dns |
+| `AI-DNS-Update.bat` | Full rollback, then removes the cached lists and compiled engine, then selects a resolver from scratch with freshly downloaded lists |
+| `AI-DNS-Settings.bat` | Opens the settings menu: required services, own domains, default switches and more |
+
+### Settings
+
+`AI-DNS-Settings.bat` opens a menu that works with the arrow keys, `Enter`, `Space`, `Del` and
+`Esc`; the digits jump to an item. Every change is saved at once to `settings.json` next to the
+scripts. Disable and Update never touch this file.
+
+| Section | What can be changed |
+|---|---|
+| Services and domains | The mode of every service: **Required**, **Preferred** or **Not checked**. By default ChatGPT and Claude are required, everything else is preferred. Own domains are added here |
+| Default switches | `-TestOnly`, `-DryRun`, `-Trace`, `-Offline`, `-Full`, `-EnableIPv6` and `-ResetNetwork`, turned on for every run of the actions that accept them |
+| What Enable may change | IPv6 on the adapters, browser secure DNS, `hosts` entries, NRPT routing and Windows DoH templates, each can be left alone. Disable always reverts all of them |
+| DNS servers | Own smart DNS addresses, excluded providers and addresses, and a pinned provider that becomes the primary whenever it opens every required service |
+| Language, log and window | Console language, the log folder, how long the window stays open after success and the new version notice |
+| Check status | Shows the configured DNS and NRPT rules and checks every service through the system resolver. Changes nothing and needs no administrator rights |
+| Run | Enable, test without changes, Update or Disable with the current settings |
+
+**Service modes.** A resolver set is chosen only if it opens every **required** service, by the primary
+resolver itself or through an NRPT route. **Preferred** services count towards the choice. A service that
+is **not checked** is ignored.
+
+**Own domains.** Any site can be added, for example `perplexity.ai`. The domain is validated when it is
+added: it must be a valid name, must not overlap a built-in service and must have an address in DNS. It
+is added as required and checked strictly: the DNS answer, a valid certificate, a complete page, and
+HTTP 403 or 451 counts as blocked (a Cloudflare bot challenge does not). If no resolver opens a
+required service, Enable says which one is to blame and offers to remove it, or make it preferred, and
+continue at once without probing again. The menu marks such a service and removes it with one key.
+
+### From PowerShell
+
+```powershell
+.\AI-DNS.ps1 -Action Enable -TestOnly      # rank the resolvers, change nothing
+.\AI-DNS.ps1 -Action Enable                # apply the best resolver
+.\AI-DNS.ps1 -Action Update                # roll back, clear caches, enable from scratch
+.\AI-DNS.ps1 -Action Disable -Full         # roll back and clean up as much as possible
+.\AI-DNS.ps1 -Action Status                # show the configuration and check every service
+.\AI-DNS.ps1 -Action Settings              # open the settings menu
+```
+
+The `.bat` files pass their arguments through, so `AI-DNS-Enable.bat -TestOnly` also works. Switches
+given here are added to the default switches from the settings.
+
+### Options
+
+| Option | Applies to | Effect |
+|---|---|---|
+| `-TestOnly` | Enable | Rank the resolvers and stop without changing anything |
+| `-DryRun` | Enable, Disable, Update | Perform every check, but only log the changes instead of making them |
+| `-Trace` | all | Log every DNS query, HTTPS check and change with its state before and after |
+| `-Offline` | Enable, Update | Do not download provider lists; use the bundled list and the cache |
+| `-Full` | Disable, Update | Reset all adapters to DHCP, delete the commented-out hosts entries, remove the data directory even after errors |
+| `-EnableIPv6` | Disable, Update | Enable IPv6 on every adapter, not only where ai-dns turned it off |
+| `-ResetNetwork` | Disable | Also reset Winsock and TCP/IP; a restart is required |
+| `-Language en\|ru` | all | Console language; by default it comes from the settings, then from the Windows UI language |
+| `-LogDirectory <path>` | all | Where to write the log; the default is the settings, then `%ProgramData%\AIDNS\logs` |
+| `-NoWait` | all | Close the window as soon as the action finishes |
+| `-NoUpdateCheck` | Enable, Disable, Update | Do not look for a new release before starting |
+
+### How it works
+
+1. **Provider lists.** The bundled [`src/providers.json`](src/providers.json) is merged with two
+   remote lists: this repository's own `providers.json` and the community list of
+   [DnsSwitch](https://github.com/WhIteGh0s1/DnsSwitch). Each is downloaded from GitHub with a
+   jsDelivr mirror, cached for 6 hours, and the old copy is used when a download fails. Entries that
+   share an address or host are folded into one provider. Own servers from the settings are added.
+2. **Discovery.** The current addresses of every provider are resolved from its host names and DoH
+   host names through public resolvers, so a provider that moves to new servers is still found.
+3. **Reference answers.** Every service is resolved through Yandex, Google and Cloudflare DNS to know
+   its real addresses and tell a proxy from a direct answer.
+4. **DNS poll.** All candidates are queried in one batch from a single UDP socket. The whole poll is
+   bounded by two 1.5 s rounds, however many resolvers are dead.
+5. **HTTPS checks.** Each service is opened through the address the resolver returned: the
+   Cloudflare region from `/cdn-cgi/trace`, the answers of the OpenAI, Anthropic and Gemini APIs to a
+   dummy key, transfers that stall half-way (DPI throttling), TLS resets by site name and forged
+   certificates. Certificates are always validated; nothing is sent over an unvalidated connection.
+6. **Selection.** Resolvers are ranked by the services they open, a required service outweighing all
+   preferred ones together, then by DNS and TLS latency. The best resolver that opens every required
+   service becomes the primary, the next one that opens the same services becomes the secondary.
+   Services the primary cannot open are routed to another resolver through NRPT.
+7. **Application and verification.** After the changes below, the DNS cache is flushed and every
+   service is checked again through the system resolver, exactly as applications see it.
+
+If no resolver works, nothing is applied, and an adapter that still points at a dead smart DNS is
+returned to its original resolvers.
+
+### What changes on the system
+
+| Setting | Enable | Disable |
+|---|---|---|
+| IPv4 DNS of physical adapters with a gateway | primary + secondary resolver | the saved servers, or DHCP |
+| IPv6 on those adapters | turned off, so ISP AAAA answers cannot bypass the proxy | turned back on where ai-dns turned it off |
+| NRPT rules (comment `AIDNS`) | per-service routing when needed | removed |
+| Windows DoH templates (Windows 11) | added for resolvers that serve DoH, with UDP fallback | removed |
+| Chrome, Edge, Brave and Firefox policies | built-in secure DNS off | the saved values are written back |
+| `hosts` entries for the checked services | commented out with `# AIDNS-disabled:` | uncommented (deleted with `-Full`) |
+| `%ProgramData%\AIDNS` | backup, state, cache, logs | removed |
+
+Each row except the first and the last can be switched off in the settings. The backup is written once,
+before the first change, and repeated enables never overwrite it. VPN and virtual adapters are not
+touched. The data directory is restricted to administrators, because it holds a compiled assembly
+loaded by an elevated process and the backup that drives registry restores. Backups written by
+version 2.x are read as well.
+
+### Providers
+
+The bundled list contains Comss.one, GeoHide (Russia, EU, US), Zapret DNS, DNS-AI, Malw.link,
+Astracat, Mafioznik, XyZ DNS, Bez mezhau, WebShift DNS, Xbox DNS, a community pool of gateways and
+the Iranian anti-sanction resolvers Shecan, Begzar and Electro: 57 addresses in total. Resolvers that
+do not answer or do not open any service are filtered out automatically, so the list errs on the side
+of completeness.
+
+To add or update a provider, edit [`src/providers.json`](src/providers.json). The format is described
+by [`src/providers.schema.json`](src/providers.schema.json) and checked in CI. Every installed copy
+picks up the change from the repository within 6 hours, without a new release.
+
+### Testing
+
+`tests/manual` contains copies of the three scripts for manual testing. Every copy writes a detailed
+log to `tests/manual/logs`:
+
+| Copy | Changes settings | Log |
+|---|---|---|
+| `AI-DNS-*-Trace.bat` | yes | every query, check and change with before and after state |
+| `AI-DNS-*-DryRun.bat` | no, changes are only logged | the same, with `[dry run]` for each skipped change |
+
+The automated tests in `tests/*.Tests.ps1` use [Pester 5](https://pester.dev) and never touch
+network settings:
+
+```powershell
+Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Scope CurrentUser
+Invoke-Pester -Path .\tests
+```
+
+### For maintainers
+
+| Tool | What it does |
+|---|---|
+| `tools\Build-Release.ps1` | Builds `dist\ai-dns-<version>.zip` with only the files needed to run ai-dns, plus its SHA-256 checksum. Every file must be committed |
+| `tools\Record-Demo.ps1 -LogPath <log>` | Renders the demo GIF in `docs\` from the log of a real run. Nothing is executed; the DNS in use before the run, VPN warnings and log paths are removed. Needs Python 3 with Pillow |
+
+### Requirements
+
+- Windows 10 or 11 (Home included)
+- Windows PowerShell 5.1 and .NET Framework 4.7 or later (both ship with Windows)
+- An administrator account
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success; for Status, every required service works |
+| 1 | Failure, details are shown in the window and the log |
+| 2 | No resolver set opens the required services; nothing was changed |
+| 3 | Finished with problems, see the warnings; for Status, a required service does not work |
+| 1223 | The elevation prompt was cancelled, nothing was changed |
+
+---
+
+## Лицензия / License
 
 [Apache License 2.0](LICENSE). Copyright 2026 Lev Burmistrov (Mahiron-hq).
