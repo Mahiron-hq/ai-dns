@@ -42,10 +42,16 @@ if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force 
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
 try {
+    # Entries carry the commit time instead of the checkout time, so the same commit gives the same archive.
     foreach ($file in $files) {
-        $entry = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, (Join-Path $root $file), "$name/$file",
-            [IO.Compression.CompressionLevel]::Optimal)
+        $entry = $archive.CreateEntry("$name/$file", [IO.Compression.CompressionLevel]::Optimal)
         $entry.LastWriteTime = $stamp
+        $stream = $entry.Open()
+        try {
+            $bytes = [IO.File]::ReadAllBytes((Join-Path $root $file))
+            $stream.Write($bytes, 0, $bytes.Length)
+        }
+        finally { $stream.Dispose() }
     }
     $entry = $archive.CreateEntry("$name/README.txt", [IO.Compression.CompressionLevel]::Optimal)
     $entry.LastWriteTime = $stamp
