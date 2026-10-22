@@ -227,6 +227,8 @@ function Restore-BrowserPolicy {
 
     $valid = @(Select-ValidPolicyRecord $Records)
     $changed = 0
+    # In a dry run a removed value is still there, so the leftover pass below must not count it again.
+    $handled = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     for ($i = $valid.Count - 1; $i -ge 0; $i--) {
         $record = $valid[$i]
         $path = "$($record.Key)\$($record.Name)"
@@ -242,6 +244,7 @@ function Restore-BrowserPolicy {
                 $null = Invoke-SystemChange "Remove policy $path" {
                     Remove-ItemProperty -LiteralPath $record.Key -Name $record.Name -ErrorAction Stop
                 }
+                $null = $handled.Add($path)
                 $changed++
             }
         }
@@ -254,6 +257,7 @@ function Restore-BrowserPolicy {
         $current = Get-RegistryValueInfo $policy.Key $policy.Name
         if (-not $current.Exists -or "$($current.Value)" -ne "$($policy.Value)") { continue }
         $path = "$($policy.Key)\$($policy.Name)"
+        if ($handled.Contains($path)) { continue }
         try {
             $null = Invoke-SystemChange "Remove leftover policy $path" {
                 Remove-ItemProperty -LiteralPath $policy.Key -Name $policy.Name -ErrorAction Stop
@@ -277,7 +281,7 @@ function Restore-BrowserPolicy {
     The registrable domains whose hosts entries would override the smart DNS.
 #>
 function Get-ManagedDomain {
-    @($script:Services | ForEach-Object { $_.Namespaces } | ForEach-Object { $_.TrimStart('.').ToLowerInvariant() } |
+    @($script:Services | Where-Object { $_.Mode -ne 'Off' } | ForEach-Object { $_.Namespaces } | ForEach-Object { $_.TrimStart('.').ToLowerInvariant() } |
         Select-Object -Unique)
 }
 
@@ -443,8 +447,7 @@ function Clear-NetworkCache {
     System.Boolean. True when every reset command succeeded.
 #>
 function Reset-NetworkStack {
-    $netsh = Join-Path $env:SystemRoot 'System32
-etsh.exe'
+    $netsh = Join-Path $env:SystemRoot 'System32\netsh.exe'
     $failed = [Collections.Generic.List[string]]::new()
     foreach ($arguments in @(@('winsock', 'reset'), @('int', 'ip', 'reset'), @('int', 'ipv6', 'reset'))) {
         $null = Invoke-SystemChange "netsh $($arguments -join ' ')" {

@@ -63,7 +63,19 @@ Describe 'Module manifest' {
     It 'is valid and exports only the public entry points' {
         $manifest = Test-ModuleManifest (Join-Path $script:SourceRoot 'AIDNS.psd1')
         @($manifest.ExportedFunctions.Keys | Sort-Object) -join ',' |
-            Should -Be 'Invoke-AiDns,Request-AiDnsElevation,Test-AiDnsElevation,Wait-AiDnsExit'
+            Should -Be 'Invoke-AiDns,Invoke-AiDnsVersionCheck,Request-AiDnsElevation,Start-AiDnsSettingsMenu,Test-AiDnsElevation,Wait-AiDnsExit'
+    }
+}
+
+Describe 'Launchers' {
+    It '<Name> starts AI-DNS.ps1 with -Action <Action>' -ForEach @(
+        @{ Name = 'AI-DNS-Enable.bat'; Action = 'Enable' }
+        @{ Name = 'AI-DNS-Disable.bat'; Action = 'Disable' }
+        @{ Name = 'AI-DNS-Update.bat'; Action = 'Update' }
+        @{ Name = 'AI-DNS-Settings.bat'; Action = 'Settings' }
+    ) {
+        $text = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) $Name))
+        $text | Should -Match ([regex]::Escape('-File "%~dp0AI-DNS.ps1" -Action ' + $Action + ' %*'))
     }
 }
 

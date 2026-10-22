@@ -73,6 +73,7 @@ function Invoke-AiDnsDisable {
     Write-StepLine 'Step.Adapters'
     $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
     $done = [Collections.Generic.List[string]]::new()
+    $adapterChanges = 0
     foreach ($record in $records) {
         $nic = @($adapters | Where-Object { $_.InterfaceGuid -eq $record.Guid }) | Select-Object -First 1
         if ($null -eq $nic) {
@@ -87,6 +88,7 @@ function Invoke-AiDnsDisable {
             if ($static.Count) { Write-OkLine 'Disable.AdapterStatic' $nic.Name ($static -join ', ') }
             else { Write-OkLine 'Disable.AdapterDhcp' $nic.Name }
             $done.Add([string]$nic.InterfaceGuid)
+            $adapterChanges++
         }
         catch { Write-FailLine 'Adapter.Failed' $nic.Name $_.Exception.Message }
     }
@@ -98,6 +100,7 @@ function Invoke-AiDnsDisable {
         try {
             Restore-AdapterDnsServer $nic.ifIndex $nic.Name
             Write-OkLine 'Disable.AdapterReset' $nic.Name ($current -join ', ')
+            $adapterChanges++
         }
         catch { Write-FailLine 'Adapter.Failed' $nic.Name $_.Exception.Message }
     }
@@ -184,6 +187,11 @@ function Invoke-AiDnsDisable {
     }
 
     Write-StepLine 'Step.Summary'
+    # Nothing was changed in a dry run, so the adapters still showing smart DNS is the expected outcome.
+    if ($script:Run.DryRun) {
+        Write-OkLine 'Disable.DryRunDone' $adapterChanges
+        return [pscustomobject]@{ ExitCode = $(if ($script:Run.Errors -eq 0) { 0 } else { 3 }); RestartRequired = $false }
+    }
     $remaining = 0
     foreach ($c in @(Get-NetworkConnection)) {
         $current = @(Get-AdapterDnsServer $c.Index)

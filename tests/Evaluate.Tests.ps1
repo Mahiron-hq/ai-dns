@@ -117,37 +117,181 @@ Describe 'Test-ServiceAccess for APIs' {
     }
 }
 
-Describe 'Select-AiDnsPlan' {
-    It 'picks the best resolver and routes services it cannot open' {
-        $plan = InModuleScope AIDNS {
-            function New-Ranked([string] $Address, [double] $Score, [string[]] $Working) {
-                $c = New-Candidate $Address ([pscustomobject]@{ Id = $Address; Name = $Address; Doh = [string[]]@() })
-                foreach ($s in $script:Services) { $c.Verdicts[$s.Id] = New-Verdict ($Working -contains $s.Id) 'Test' }
-                $c.Score = $Score
-                $c.WebCount = @($script:Services | Where-Object { $_.Group -eq 'Web' -and $Working -contains $_.Id }).Count
-                $c.Mask = -join @($script:Services | Where-Object { $_.Group -eq 'Web' } | ForEach-Object { if ($Working -contains $_.Id) { '1' } else { '0' } })
-                $c
+Describe 'Test-ServiceAccess for user-added domains' {
+    BeforeAll {
+        # Probes example.org through $Address; $Responses maps a check path to AiDns.HttpsProbe field values.
+        function Test-Strict([hashtable] $Responses, [string] $Address = '203.0.114.20', [hashtable] $Reference = @{}) {
+            InModuleScope AIDNS -Parameters @{ Responses = $Responses; Address = $Address; Reference = $Reference } {
+                $service = New-CustomService 'example.org'
+                $candidate = New-Candidate $Address $null
+                $query = New-DnsQuery $Address $service.Domain $service.Id
+                $query.Addresses = [string[]]@($Address)
+                $query.RCode = 0
+                $query.Error = [AiDns.ProbeError]::None
+                $candidate.Dns[$service.Id] = $query
+                $https = @{}
+                foreach ($check in $service.Checks) {
+                    $fields = $Responses[$check.Path]
+                    if ($null -eq $fields) { continue }
+                    $probe = New-HttpsProbe $Address $service.Domain $check
+                    $probe.TcpOk = $true
+                    $probe.TlsOk = $true
+                    foreach ($name in $fields.Keys) { $probe.$name = $fields[$name] }
+                    $https[(Get-CheckKey $Address $service.Domain $check.Path)] = $probe
+                }
+                Test-ServiceAccess $service $candidate ([pscustomobject]@{ Services = @($service); Reference = $Reference; Https = $https })
             }
-            $all = @($script:Services | ForEach-Object { $_.Id })
-            $candidates = @(
-                (New-Ranked '198.51.101.1' 2000000 @($all | Where-Object { $_ -ne 'claude' }))
-                (New-Ranked '198.51.101.2' 1000000 @('claude', 'chatgpt'))
-                (New-Ranked '198.51.101.3' 1500000 @($all | Where-Object { $_ -ne 'claude' }))
-            )
-            Select-AiDnsPlan $candidates $script:Services
         }
+        $script:NotCloudflare = @{ Status = 404; Head = "HTTP/1.1 404 Not Found`r`n`r`n" }
+    }
+
+    It 'accepts <Case>' -ForEach @(
+        @{ Case = 'a Cloudflare site in a supported region'; Trace = @{ Status = 200; Head = "HTTP/1.1 200 OK`r`n`r`nloc=DE`n" }; Page = @{ Status = 200 }; Reason = 'Region' }
+        @{ Case = 'a Cloudflare bot challenge'; Trace = @{ Status = 200; Head = "HTTP/1.1 200 OK`r`n`r`nloc=NL`n" }; Page = @{ Status = 403; Head = "HTTP/1.1 403 Forbidden`r`ncf-mitigated: challenge`r`n`r`n" }; Reason = 'Region' }
+    ) {
+        $verdict = Test-Strict @{ '/cdn-cgi/trace' = $Trace; '/' = $Page }
+        $verdict.Ok | Should -BeTrue
+        $verdict.Reason | Should -Be $Reason
+    }
+
+    It 'tells a proxied answer from a direct one' {
+        $reference = @{ 'example.org' = @('198.51.100.7') }
+        (Test-Strict @{ '/cdn-cgi/trace' = $script:NotCloudflare; '/' = @{ Status = 200 } } -Reference $reference).Reason | Should -Be 'Proxied'
+        (Test-Strict @{ '/cdn-cgi/trace' = $script:NotCloudflare; '/' = @{ Status = 200 } } -Address '198.51.100.9' -Reference $reference).Reason | Should -Be 'Direct'
+    }
+
+    It 'rejects <Case>' -ForEach @(
+        @{ Case = 'HTTP 403'; Trace = $null; Page = @{ Status = 403; Head = "HTTP/1.1 403 Forbidden`r`n`r`n" }; Reason = 'BlockedStatus' }
+        @{ Case = 'HTTP 451'; Trace = $null; Page = @{ Status = 451 }; Reason = 'BlockedStatus' }
+        @{ Case = 'a server error'; Trace = $null; Page = @{ Status = 503 }; Reason = 'HttpStatus' }
+        @{ Case = 'a blocked Cloudflare region'; Trace = @{ Status = 200; Head = "HTTP/1.1 200 OK`r`n`r`nloc=RU`n" }; Page = @{ Status = 200 }; Reason = 'RegionBlocked' }
+        @{ Case = 'a page that never answers'; Trace = $null; Page = @{ Status = 0; Error = 'NoResponse' }; Reason = 'NoHttp' }
+        @{ Case = 'a stalled page'; Trace = $null; Page = @{ Status = 200; Stalled = $true; Detail = '16 KB' }; Reason = 'Stalled' }
+    ) {
+        $trace = if ($null -ne $Trace) { $Trace } else { $script:NotCloudflare }
+        $verdict = Test-Strict @{ '/cdn-cgi/trace' = $trace; '/' = $Page }
+        $verdict.Ok | Should -BeFalse
+        $verdict.Reason | Should -Be $Reason
+    }
+}
+
+Describe 'Update-CandidateScore' {
+    It 'ranks a resolver that opens every required service above one that opens all the others' {
+        $scores = InModuleScope AIDNS {
+            $services = @(Get-AiDnsServiceTable (New-AiDnsSetting))
+            $both = New-Candidate '198.51.101.1' $null
+            $rest = New-Candidate '198.51.101.2' $null
+            foreach ($s in $services) {
+                $both.Verdicts[$s.Id] = New-Verdict ($s.Mode -eq 'Required') 'Test'
+                $rest.Verdicts[$s.Id] = New-Verdict ($s.Id -ne 'claude') 'Test'
+            }
+            foreach ($c in @($both, $rest)) { Update-CandidateScore $c $services }
+            @($both.Score, $rest.Score)
+        }
+        $scores[0] | Should -BeGreaterThan $scores[1]
+    }
+
+    It 'ignores services that are not checked' {
+        $candidate = InModuleScope AIDNS {
+            $settings = New-AiDnsSetting
+            $settings.Modes['gemini'] = 'Off'
+            $services = @(Get-AiDnsServiceTable $settings)
+            $c = New-Candidate '198.51.101.3' $null
+            foreach ($s in $services) { $c.Verdicts[$s.Id] = New-Verdict ($s.Id -eq 'gemini') 'Test' }
+            Update-CandidateScore $c $services
+            $c
+        }
+        $candidate.WebCount | Should -Be 0
+        $candidate.Mask | Should -Be '00'
+    }
+}
+
+Describe 'Select-AiDnsPlan' {
+    BeforeAll {
+        # Each spec: Address, Provider, Working (service ids that open) and Ms (DNS latency).
+        function Invoke-Plan([object[]] $Specs, [hashtable] $Modes = @{}, [switch] $NoRoutes, [string] $Pinned = '') {
+            InModuleScope AIDNS -Parameters @{ Specs = $Specs; Modes = $Modes; NoRoutes = [bool]$NoRoutes; Pinned = $Pinned } {
+                $settings = New-AiDnsSetting
+                foreach ($id in $Modes.Keys) { $settings.Modes[$id] = $Modes[$id] }
+                $services = @(Get-AiDnsServiceTable $settings)
+                $candidates = @(foreach ($spec in $Specs) {
+                    $c = New-Candidate $spec.Address ([pscustomobject]@{ Id = $spec.Provider; Name = $spec.Provider; Doh = [string[]]@() })
+                    foreach ($s in $services) { $c.Verdicts[$s.Id] = New-Verdict (@($spec.Working) -contains $s.Id) 'Test' }
+                    $c.DnsMs = $spec.Ms
+                    $c.TlsMs = 0
+                    Update-CandidateScore $c $services
+                    $c
+                })
+                Select-AiDnsPlan $candidates $services -NoRoutes:$NoRoutes -PinnedProvider $Pinned
+            }
+        }
+        $script:All = @('chatgpt', 'claude', 'gemini', 'openai-api', 'anthropic-api', 'gemini-api', 'code-login', 'code-site', 'code-updates')
+        $script:NoGemini = @($script:All | Where-Object { $_ -ne 'gemini' })
+    }
+
+    It 'prefers a resolver that opens every required service and routes the rest' {
+        $plan = Invoke-Plan @(
+            @{ Address = '198.51.101.1'; Provider = 'a'; Working = $script:NoGemini; Ms = 10 }
+            @{ Address = '198.51.101.2'; Provider = 'b'; Working = @('chatgpt', 'gemini'); Ms = 20 }
+            @{ Address = '198.51.101.3'; Provider = 'c'; Working = $script:NoGemini; Ms = 30 }
+        )
         $plan.Primary.Address | Should -Be '198.51.101.1'
         $plan.Secondary.Address | Should -Be '198.51.101.3'
         @($plan.Routes).Count | Should -Be 1
-        $plan.Routes[0].Service.Id | Should -Be 'claude'
+        $plan.Routes[0].Service.Id | Should -Be 'gemini'
         $plan.Routes[0].Servers -join ',' | Should -Be '198.51.101.2'
-        $plan.Routes[0].Namespaces | Should -Contain '.claude.ai'
+        $plan.Routes[0].Namespaces | Should -Contain 'gemini.google.com'
+        @($plan.Missing).Count | Should -Be 0
     }
 
-    It 'returns nothing when no web service works anywhere' {
-        InModuleScope AIDNS {
-            $c = New-Candidate '198.51.101.9' ([pscustomobject]@{ Id = 'x'; Name = 'x'; Doh = [string[]]@() })
-            Select-AiDnsPlan @($c) $script:Services
-        } | Should -BeNullOrEmpty
+    It 'routes a required service that the primary cannot open' {
+        $plan = Invoke-Plan @(
+            @{ Address = '198.51.101.1'; Provider = 'a'; Working = @('chatgpt', 'gemini', 'openai-api'); Ms = 10 }
+            @{ Address = '198.51.101.2'; Provider = 'b'; Working = @('claude'); Ms = 20 }
+        )
+        $plan.Primary.Address | Should -Be '198.51.101.1'
+        @($plan.Routes | Where-Object { $_.Service.Id -eq 'claude' }).Count | Should -Be 1
+        $plan.Routes[0].Namespaces | Should -Contain '.claude.ai'
+        @($plan.Missing).Count | Should -Be 0
+    }
+
+    It 'reports a required service that no resolver opens' {
+        $plan = Invoke-Plan @(
+            @{ Address = '198.51.101.1'; Provider = 'a'; Working = @('chatgpt'); Ms = 10 }
+            @{ Address = '198.51.101.2'; Provider = 'b'; Working = @('chatgpt', 'gemini'); Ms = 20 }
+        )
+        (@($plan.Missing | ForEach-Object { $_.Id }) -join ',') | Should -Be 'claude'
+    }
+
+    It 'leaves a required service uncovered without NRPT' {
+        $plan = Invoke-Plan @(
+            @{ Address = '198.51.101.1'; Provider = 'a'; Working = @('chatgpt', 'gemini'); Ms = 10 }
+            @{ Address = '198.51.101.2'; Provider = 'b'; Working = @('claude'); Ms = 20 }
+        ) -NoRoutes
+        @($plan.Routes).Count | Should -Be 0
+        (@($plan.Missing | ForEach-Object { $_.Id }) -join ',') | Should -Be 'claude'
+    }
+
+    It 'uses a pinned provider that opens every required service' {
+        $plan = Invoke-Plan @(
+            @{ Address = '198.51.101.1'; Provider = 'fast'; Working = $script:All; Ms = 10 }
+            @{ Address = '198.51.101.2'; Provider = 'mine'; Working = $script:All; Ms = 900 }
+        ) -Pinned 'mine'
+        $plan.Primary.Address | Should -Be '198.51.101.2'
+        $plan.Pinned | Should -Be 'Used'
+    }
+
+    It 'falls back when the pinned provider misses a required service' {
+        $plan = Invoke-Plan @(
+            @{ Address = '198.51.101.1'; Provider = 'fast'; Working = $script:All; Ms = 10 }
+            @{ Address = '198.51.101.2'; Provider = 'mine'; Working = @('chatgpt'); Ms = 5 }
+        ) -Pinned 'mine'
+        $plan.Primary.Address | Should -Be '198.51.101.1'
+        $plan.Pinned | Should -Be 'Failed'
+    }
+
+    It 'returns nothing when no checked web service works anywhere' {
+        Invoke-Plan @(@{ Address = '198.51.101.9'; Provider = 'x'; Working = @('gemini', 'openai-api'); Ms = 10 }) -Modes @{ gemini = 'Off' } |
+            Should -BeNullOrEmpty
     }
 }

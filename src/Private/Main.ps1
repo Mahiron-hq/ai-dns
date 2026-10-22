@@ -104,13 +104,15 @@ function Request-AiDnsElevation {
 
 <#
 .SYNOPSIS
-    Keeps the console window open so the result can be read: 20 seconds after success,
-    two minutes after a failure, or until a key is pressed. Does nothing without an interactive console.
+    Keeps the console window open so the result can be read: for the configured time after success
+    (20 seconds by default), two minutes after a failure, or until a key is pressed. Does nothing
+    without an interactive console.
 #>
 function Wait-AiDnsExit {
     param([Parameter(Mandatory)] [int] $ExitCode)
 
-    $seconds = if ($ExitCode -eq 0) { 20 } else { 120 }
+    $seconds = if ($ExitCode -eq 0) { (Get-AiDnsSetting).WaitSeconds } else { 120 }
+    if ($seconds -le 0) { return }
     try {
         if ([Console]::IsInputRedirected) { return }
         while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
@@ -139,17 +141,23 @@ function Write-RunHeader {
     $options = @($Parameters.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
     Write-LogRecord 'INFO' "AI-DNS $script:ModuleVersion, Windows $os, PowerShell $($PSVersionTable.PSVersion), .NET $([Environment]::Version), UI $([Globalization.CultureInfo]::CurrentUICulture.Name)"
     Write-LogRecord 'INFO' "Options: $options"
+    $modes = @($script:Services | ForEach-Object { "$($_.Id)=$($_.Mode)" }) -join ' '
+    Write-LogRecord 'INFO' "Services: $modes"
     if ($null -ne $script:Run.LogFile) { Write-NoteLine 'Log.Path' $script:Run.LogFile }
+    if ($null -ne $script:SettingsProblem) { Write-WarnLine 'Settings.Damaged' $script:Paths.Settings $script:SettingsProblem }
     if ($script:Run.DryRun) { Write-WarnLine 'DryRun.Active' }
 }
 
 <#
 .SYNOPSIS
-    Runs an AI-DNS action. Requires administrator rights.
+    Runs an AI-DNS action. Every action except Status requires administrator rights.
+.DESCRIPTION
+    Switches set to on in settings.json are added to the ones given here, for the actions that accept them.
 .PARAMETER Action
     Enable  find the best smart DNS and apply it.
     Disable roll everything back to the state saved before the first enable.
     Update  Disable, clear every cache, then Enable with freshly downloaded provider lists.
+    Status  show what is configured now and check every service through the system resolver.
 .PARAMETER TestOnly
     Enable only: rank the resolvers and stop without changing anything.
 .PARAMETER DryRun
@@ -166,9 +174,10 @@ function Write-RunHeader {
 .PARAMETER Offline
     Enable and Update: do not download provider lists; use the bundled list and the cache.
 .PARAMETER Language
-    Console language: Auto (from the Windows UI language), en or ru.
+    Console language: Auto (the settings, then the Windows UI language), en or ru.
 .PARAMETER LogDirectory
-    Where to write the log. Defaults to %ProgramData%\AIDNS\logs; an explicit directory is never removed.
+    Where to write the log. Defaults to the settings, then %ProgramData%\AIDNS\logs; a chosen
+    directory is never removed.
 .OUTPUTS
     System.Int32 exit code: 0 success, 1 failure, 2 no working resolver found, 3 finished with problems.
 #>
@@ -176,7 +185,7 @@ function Invoke-AiDns {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'DNS is an acronym, not a plural.')]
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [ValidateSet('Enable', 'Disable', 'Update')] [string] $Action,
+        [Parameter(Mandatory)] [ValidateSet('Enable', 'Disable', 'Update', 'Status')] [string] $Action,
         [switch] $TestOnly,
         [switch] $DryRun,
         [switch] $Trace,
@@ -188,23 +197,45 @@ function Invoke-AiDns {
         [string] $LogDirectory
     )
 
+    $settings = Get-AiDnsSetting -Reload
     Import-AiDnsStringTable (Resolve-AiDnsLanguage $Language)
     try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { Write-Verbose 'Console encoding is fixed by the host.' }
+    Use-AiDnsSetting $settings
 
+    $optionError = $null
+    if ($TestOnly -and $Action -ne 'Enable') { $optionError = Get-Text 'Error.OptionAction' @('-TestOnly', 'Enable') }
+    elseif ($ResetNetwork -and $Action -ne 'Disable') { $optionError = Get-Text 'Error.OptionAction' @('-ResetNetwork', 'Disable') }
+    $TestOnly = $TestOnly -or (Test-SettingFlag $settings 'TestOnly' $Action)
+    $DryRun = $DryRun -or (Test-SettingFlag $settings 'DryRun' $Action)
+    $Trace = $Trace -or (Test-SettingFlag $settings 'Trace' $Action)
+    $Full = $Full -or (Test-SettingFlag $settings 'Full' $Action)
+    $ResetNetwork = $ResetNetwork -or (Test-SettingFlag $settings 'ResetNetwork' $Action)
+    $EnableIPv6 = $EnableIPv6 -or (Test-SettingFlag $settings 'EnableIPv6' $Action)
+    $Offline = $Offline -or (Test-SettingFlag $settings 'Offline' $Action)
+    $effective = [ordered]@{
+        Action = $Action; TestOnly = $TestOnly; DryRun = $DryRun; Trace = $Trace; Full = $Full; ResetNetwork = $ResetNetwork
+        EnableIPv6 = $EnableIPv6; Offline = $Offline; Language = $Language
+    }
+
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) { $LogDirectory = Resolve-SettingsLogDirectory $settings }
     $explicitLog = -not [string]::IsNullOrWhiteSpace($LogDirectory)
     if (-not $explicitLog) { $LogDirectory = $script:Paths.Logs }
+    $effective.LogDirectory = $LogDirectory
     Initialize-AiDnsRun -Action $Action -LogDirectory $LogDirectory -Trace:$Trace -DryRun:$DryRun
 
     $exitCode = 1
     try {
-        if (-not (Test-AiDnsElevation)) { throw (Get-Text 'Error.NotElevated') }
-        if ($TestOnly -and $Action -ne 'Enable') { throw (Get-Text 'Error.OptionAction' @('-TestOnly', 'Enable')) }
-        if ($ResetNetwork -and $Action -ne 'Disable') { throw (Get-Text 'Error.OptionAction' @('-ResetNetwork', 'Disable')) }
+        if ($Action -ne 'Status' -and -not (Test-AiDnsElevation)) { throw (Get-Text 'Error.NotElevated') }
+        if ($null -ne $optionError) { throw $optionError }
 
-        Initialize-DataDirectory
-        Open-AiDnsLog
+        # Status runs without elevation and so cannot secure the data directory; it logs only where asked to.
+        if ($Action -ne 'Status') {
+            Initialize-DataDirectory
+            Open-AiDnsLog
+        }
+        elseif ($explicitLog) { Open-AiDnsLog }
         Show-AiDnsBanner $Action
-        Write-RunHeader $PSBoundParameters
+        Write-RunHeader $effective
 
         # Logs inside the data directory survive its removal only when the run was asked to keep a log.
         $logsInData = $script:Run.LogDirectory.StartsWith($script:Paths.Root, [StringComparison]::OrdinalIgnoreCase)
@@ -213,6 +244,7 @@ function Invoke-AiDns {
             'Enable'  { Invoke-AiDnsEnable -TestOnly:$TestOnly -Offline:$Offline }
             'Disable' { (Invoke-AiDnsDisable -Full:$Full -ResetNetwork:$ResetNetwork -EnableIPv6:$EnableIPv6 -KeepLogs:$keepLogs).ExitCode }
             'Update'  { Invoke-AiDnsUpdate -Full:$Full -EnableIPv6:$EnableIPv6 -Offline:$Offline }
+            'Status'  { Invoke-AiDnsStatus }
         })
         # The exit code is the last value; anything before it is output that leaked from a helper.
         if ($output.Count -gt 1) { Write-LogRecord 'WARN' "Unexpected pipeline output: $(Format-StateValue $output[0..($output.Count - 2)])" }

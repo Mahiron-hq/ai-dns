@@ -68,6 +68,16 @@ function Get-CloudflareRegion {
 
 <#
 .SYNOPSIS
+    Tests for a Cloudflare bot challenge: such a site answers 403 to every client that does not run
+    JavaScript, which says nothing about the region.
+#>
+function Test-CloudflareChallenge {
+    param([AllowNull()] $Probe)
+    return $null -ne $Probe -and $Probe.Head -match '(?im)^cf-mitigated:\s*challenge'
+}
+
+<#
+.SYNOPSIS
     Decides whether Service works through Candidate.
 .PARAMETER Candidate
     An object whose Dns property maps service ids to AiDns.DnsQuery results from the candidate.
@@ -153,71 +163,134 @@ function Test-ServiceAccess {
             }
             return New-Verdict $true 'Direct'
         }
+        'Strict' {
+            $page = $results[$results.Count - 1]
+            $region = Get-CloudflareRegion $first
+            if ($region -and $script:BlockedRegions -contains $region) { return New-Verdict $false 'RegionBlocked' $region }
+            if ($page.Status -in @(403, 451) -and -not (Test-CloudflareChallenge $page)) { return New-Verdict $false 'BlockedStatus' $page.Status }
+            if ($page.Status -ge 500) { return New-Verdict $false 'HttpStatus' $page.Status }
+            if ($region) { return New-Verdict $true 'Region' $region }
+            if (Test-ProxiedAddress @($address) $Service.Domain $Context.Reference) { return New-Verdict $true 'Proxied' }
+            return New-Verdict $true 'Direct'
+        }
         default { throw "Unknown service kind '$($Service.Kind)'." }
     }
 }
 
 <#
 .SYNOPSIS
-    Fills in verdicts, counters, latency, score, the web-service mask and the working DoH template.
-.DESCRIPTION
-    Score orders by the summed weight of working services first; DNS and TLS latency only break
-    ties, and an unmeasured latency costs 3 s.
+    Fills in the verdicts, the TLS latency and the working DoH template, then scores the candidate.
 #>
 function Measure-Candidate {
     param([Parameter(Mandatory)] $Candidate, [Parameter(Mandatory)] $Context, [AllowEmptyCollection()] [object[]] $DohProbes = @())
 
-    $weight = 0
     $tls = [Collections.Generic.List[object]]::new()
     foreach ($service in $Context.Services) {
         $verdict = Test-ServiceAccess $service $Candidate $Context
         $Candidate.Verdicts[$service.Id] = $verdict
-        if (-not $verdict.Ok) { continue }
-        $weight += $service.Weight
-        if ($service.Group -eq 'Web') { $Candidate.WebCount++ }
-        elseif ($service.Group -eq 'Api') { $Candidate.ApiCount++ }
+        if (-not $verdict.Ok -or $service.Mode -eq 'Off') { continue }
         $address = $Candidate.Dns[$service.Id].Addresses[0]
         foreach ($check in $service.Checks) {
             $probe = $Context.Https[(Get-CheckKey $address $service.Domain $check.Path)]
             if ($null -ne $probe -and $null -ne $probe.TlsMs) { $tls.Add($probe.TlsMs) }
         }
     }
-
     $Candidate.TlsMs = Get-Median $tls.ToArray()
-    $dnsCost = if ($null -ne $Candidate.DnsMs) { $Candidate.DnsMs } else { 3000 }
-    $tlsCost = if ($null -ne $Candidate.TlsMs) { $Candidate.TlsMs } else { 3000 }
-    $Candidate.Score = $weight * 10000 - $dnsCost - $tlsCost
-    $Candidate.Mask = -join @($Context.Services | Where-Object { $_.Group -eq 'Web' } |
-        ForEach-Object { if ($Candidate.Verdicts[$_.Id].Ok) { '1' } else { '0' } })
 
     foreach ($template in $Candidate.Provider.Doh) {
         $hit = @($DohProbes | Where-Object { $_.Address -eq $Candidate.Address -and $_.Template -eq $template -and $_.Ok })
         if ($hit.Count -gt 0) { $Candidate.DohTemplate = $template; break }
     }
+    Update-CandidateScore $Candidate $Context.Services
+}
+
+<#
+.SYNOPSIS
+    The services that decide whether a resolver is usable at all: the checked web and user-added
+    services, or every checked service when all of those are switched off.
+#>
+function Get-GatingService {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Services)
+
+    $active = @($Services | Where-Object { $_.Mode -ne 'Off' })
+    $gating = @($active | Where-Object { $_.Group -eq 'Web' -or $_.Group -eq 'Custom' })
+    if ($gating.Count -gt 0) { return $gating }
+    return $active
+}
+
+<#
+.SYNOPSIS
+    Recomputes the score, the gating counter and the service mask from the existing verdicts, so a
+    change of service modes needs no new probes.
+.DESCRIPTION
+    Score orders by the summed weight of working services first, a required service weighing
+    RequiredWeight; DNS and TLS latency only break ties, and an unmeasured latency costs 3 s.
+#>
+function Update-CandidateScore {
+    param([Parameter(Mandatory)] $Candidate, [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Services)
+
+    $gating = @(Get-GatingService $Services | ForEach-Object { $_.Id })
+    $weight = 0
+    $Candidate.WebCount = 0
+    $Candidate.ApiCount = 0
+    foreach ($service in @($Services | Where-Object { $_.Mode -ne 'Off' })) {
+        $verdict = $Candidate.Verdicts[$service.Id]
+        if ($null -eq $verdict -or -not $verdict.Ok) { continue }
+        $weight += $(if ($service.Mode -eq 'Required') { $script:RequiredWeight } else { $service.Weight })
+        if ($gating -contains $service.Id) { $Candidate.WebCount++ }
+        elseif ($service.Group -eq 'Api') { $Candidate.ApiCount++ }
+    }
+    $dnsCost = if ($null -ne $Candidate.DnsMs) { $Candidate.DnsMs } else { 3000 }
+    $tlsCost = if ($null -ne $Candidate.TlsMs) { $Candidate.TlsMs } else { 3000 }
+    $Candidate.Score = $weight * 10000 - $dnsCost - $tlsCost
+    $Candidate.Mask = -join @($gating | ForEach-Object { if ($null -ne $Candidate.Verdicts[$_] -and $Candidate.Verdicts[$_].Ok) { '1' } else { '0' } })
 }
 
 <#
 .SYNOPSIS
     Chooses the primary and secondary resolver and NRPT routes for services the primary cannot open.
+.PARAMETER NoRoutes
+    NRPT is not used, so whatever the primary cannot open stays unavailable.
+.PARAMETER PinnedProvider
+    Provider id that takes the primary whenever one of its resolvers opens every required service.
 .OUTPUTS
-    The plan, or $null when no candidate opens any web service.
+    The plan, or $null when no candidate opens any gating service. Missing lists the required
+    services the plan leaves uncovered; Pinned is 'Used', 'Failed' or empty.
 #>
 function Select-AiDnsPlan {
-    param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Candidates, [Parameter(Mandatory)] [object[]] $Services)
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Candidates,
+        [Parameter(Mandatory)] [object[]] $Services,
+        [switch] $NoRoutes,
+        [string] $PinnedProvider
+    )
 
+    $active = @($Services | Where-Object { $_.Mode -ne 'Off' })
+    $required = @($active | Where-Object { $_.Mode -eq 'Required' })
     $ranked = @($Candidates | Sort-Object Score -Descending)
     $good = @($ranked | Where-Object { $_.WebCount -gt 0 })
     if ($good.Count -eq 0) { return $null }
 
-    $primary = $good[0]
+    $complete = @($good | Where-Object {
+        $verdicts = $_.Verdicts
+        @($required | Where-Object { -not $verdicts[$_.Id].Ok }).Count -eq 0
+    })
+    $pinned = ''
+    $primary = $null
+    if ($PinnedProvider) {
+        $primary = @($complete | Where-Object { $null -ne $_.Provider -and $_.Provider.Id -eq $PinnedProvider }) | Select-Object -First 1
+        $pinned = if ($null -ne $primary) { 'Used' } else { 'Failed' }
+    }
+    if ($null -eq $primary) { $primary = if ($complete.Count -gt 0) { $complete[0] } else { $good[0] } }
+
     # Prefer a secondary that opens the same services, so a failover does not silently change what works.
     $secondary = @($good | Where-Object { $_.Address -ne $primary.Address -and $_.Mask -eq $primary.Mask }) | Select-Object -First 1
     if ($null -eq $secondary) { $secondary = @($good | Where-Object { $_.Address -ne $primary.Address }) | Select-Object -First 1 }
 
     $routes = [Collections.Generic.List[object]]::new()
     $used = [Collections.Generic.List[string]]::new()
-    foreach ($service in $Services) {
-        if (@($service.Namespaces).Count -eq 0 -or $primary.Verdicts[$service.Id].Ok) { continue }
+    foreach ($service in $active) {
+        if ($NoRoutes -or @($service.Namespaces).Count -eq 0 -or $primary.Verdicts[$service.Id].Ok) { continue }
         $alternatives = @($ranked | Where-Object { $_.Verdicts[$service.Id].Ok } | Select-Object -First 2)
         $namespaces = @($service.Namespaces | Where-Object { -not $used.Contains($_) })
         if ($alternatives.Count -eq 0 -or $namespaces.Count -eq 0) { continue }
@@ -230,6 +303,8 @@ function Select-AiDnsPlan {
         })
     }
 
+    $routed = @($routes | ForEach-Object { $_.Service.Id })
+    $missing = @($required | Where-Object { -not $primary.Verdicts[$_.Id].Ok -and $routed -notcontains $_.Id })
     $servers = @($primary.Address)
     if ($null -ne $secondary) { $servers += $secondary.Address }
     return [pscustomobject]@{
@@ -237,5 +312,7 @@ function Select-AiDnsPlan {
         Secondary = $secondary
         Servers   = [string[]]$servers
         Routes    = $routes.ToArray()
+        Missing   = $missing
+        Pinned    = $pinned
     }
 }

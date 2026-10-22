@@ -16,6 +16,15 @@ function Initialize-ProbeEngine {
     try { $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($source)) } finally { $sha.Dispose() }
     $hash = -join ($digest[0..5] | ForEach-Object { $_.ToString('x2') })
     $dll = Join-Path $script:Paths.Cache "probe_$hash.dll"
+    # Without elevation the administrator-only cache cannot be written, so the engine is compiled in memory.
+    if (-not (Test-AiDnsElevation)) {
+        if (Test-Path -LiteralPath $dll -PathType Leaf) {
+            try { Add-Type -Path $dll -ErrorAction Stop; return }
+            catch { Write-TraceLine "engine: cached assembly rejected: $($_.Exception.Message)" }
+        }
+        Add-Type -TypeDefinition $source -Language CSharp -ErrorAction Stop
+        return
+    }
     $null = New-Item -ItemType Directory -Path $script:Paths.Cache -Force
 
     if (Test-Path -LiteralPath $dll -PathType Leaf) {

@@ -1,6 +1,9 @@
 # Static configuration shared by every action.
 
 $script:RepositoryUrl = 'https://github.com/Mahiron-hq/ai-dns'
+$script:LatestReleaseApi = 'https://api.github.com/repos/Mahiron-hq/ai-dns/releases/latest'
+$script:UpdateCheckInterval = [TimeSpan]::FromHours(24)
+$script:UpdateCheckTimeoutMs = 2000
 
 # Remote provider lists, tried in order per feed. Both are mirrored through jsDelivr because
 # raw.githubusercontent.com is intermittently unreachable from Russian networks.
@@ -49,8 +52,14 @@ $script:Timing = [pscustomobject]@{
 #   AnthropicApi  must be proxied and answer 401 to a dummy key (403 means a closed region)
 #   GoogleApi     must reject the dummy key instead of the location
 #   Generic       Cloudflare region when available, otherwise proxied or plainly reachable
-$script:ServiceKinds = @('Cloudflare', 'GoogleWeb', 'OpenAiApi', 'AnthropicApi', 'GoogleApi', 'Generic')
-$script:ServiceGroups = @('Web', 'Api', 'Support')
+#   Strict        a user-added domain: every check must answer, and 403, 451 and 5xx count as blocked
+$script:ServiceKinds = @('Cloudflare', 'GoogleWeb', 'OpenAiApi', 'AnthropicApi', 'GoogleApi', 'Generic', 'Strict')
+# Web and Custom services decide whether a resolver is usable at all; Api and Support only add to its score.
+$script:ServiceGroups = @('Web', 'Api', 'Support', 'Custom')
+# Required: a resolver set is chosen only if it opens the service. Preferred: adds Weight to the score. Off: not checked.
+$script:ServiceModes = @('Required', 'Preferred', 'Off')
+$script:RequiredWeight = 1000
+$script:CustomServiceLimit = 16
 
 function New-ServiceCheck {
     param(
@@ -61,23 +70,23 @@ function New-ServiceCheck {
     [pscustomobject]@{ Path = $Path; MaxBytes = $MaxBytes; Headers = $Headers }
 }
 
-$script:Services = @(
+$script:BuiltInServices = @(
     [pscustomobject]@{
-        Id = 'chatgpt'; Name = 'ChatGPT'; Domain = 'chatgpt.com'; Weight = 100; Group = 'Web'; Kind = 'Cloudflare'
+        Id = 'chatgpt'; Mode = 'Required'; Name = 'ChatGPT'; Domain = 'chatgpt.com'; Weight = 100; Group = 'Web'; Kind = 'Cloudflare'
         RegionFrom = $null; ClaudeCode = $false
         Checks     = @((New-ServiceCheck '/cdn-cgi/trace'), (New-ServiceCheck '/' -MaxBytes 65536))
         Namespaces = @('chatgpt.com', '.chatgpt.com', 'openai.com', '.openai.com', 'oaistatic.com', '.oaistatic.com',
                        'oaiusercontent.com', '.oaiusercontent.com')
     }
     [pscustomobject]@{
-        Id = 'claude'; Name = 'Claude'; Domain = 'claude.ai'; Weight = 100; Group = 'Web'; Kind = 'Cloudflare'
+        Id = 'claude'; Mode = 'Required'; Name = 'Claude'; Domain = 'claude.ai'; Weight = 100; Group = 'Web'; Kind = 'Cloudflare'
         RegionFrom = $null; ClaudeCode = $false
         Checks     = @((New-ServiceCheck '/cdn-cgi/trace'), (New-ServiceCheck '/' -MaxBytes 65536))
         Namespaces = @('claude.ai', '.claude.ai', 'claude.com', '.claude.com', 'anthropic.com', '.anthropic.com',
                        'claudeusercontent.com', '.claudeusercontent.com')
     }
     [pscustomobject]@{
-        Id = 'gemini'; Name = 'Gemini'; Domain = 'gemini.google.com'; Weight = 100; Group = 'Web'; Kind = 'GoogleWeb'
+        Id = 'gemini'; Mode = 'Preferred'; Name = 'Gemini'; Domain = 'gemini.google.com'; Weight = 100; Group = 'Web'; Kind = 'GoogleWeb'
         RegionFrom = 'gemini-api'; ClaudeCode = $false
         Checks     = @((New-ServiceCheck '/' -MaxBytes 65536))
         Namespaces = @('gemini.google.com', 'gemini.google', 'bard.google.com', 'aistudio.google.com',
@@ -85,19 +94,19 @@ $script:Services = @(
                        'robinfrontend-pa.googleapis.com', 'proactivebackend-pa.googleapis.com')
     }
     [pscustomobject]@{
-        Id = 'openai-api'; Name = 'OpenAI API'; Domain = 'api.openai.com'; Weight = 30; Group = 'Api'; Kind = 'OpenAiApi'
+        Id = 'openai-api'; Mode = 'Preferred'; Name = 'OpenAI API'; Domain = 'api.openai.com'; Weight = 30; Group = 'Api'; Kind = 'OpenAiApi'
         RegionFrom = $null; ClaudeCode = $false
         Checks     = @((New-ServiceCheck '/v1/models'))
         Namespaces = @('api.openai.com')
     }
     [pscustomobject]@{
-        Id = 'anthropic-api'; Name = 'Anthropic API'; Domain = 'api.anthropic.com'; Weight = 60; Group = 'Api'; Kind = 'AnthropicApi'
+        Id = 'anthropic-api'; Mode = 'Preferred'; Name = 'Anthropic API'; Domain = 'api.anthropic.com'; Weight = 60; Group = 'Api'; Kind = 'AnthropicApi'
         RegionFrom = $null; ClaudeCode = $true
         Checks     = @((New-ServiceCheck '/v1/models' -Headers @('anthropic-version: 2023-06-01', 'x-api-key: sk-ant-aidns-geo-probe')))
         Namespaces = @('api.anthropic.com')
     }
     [pscustomobject]@{
-        Id = 'gemini-api'; Name = 'Gemini API'; Domain = 'generativelanguage.googleapis.com'; Weight = 30; Group = 'Api'; Kind = 'GoogleApi'
+        Id = 'gemini-api'; Mode = 'Preferred'; Name = 'Gemini API'; Domain = 'generativelanguage.googleapis.com'; Weight = 30; Group = 'Api'; Kind = 'GoogleApi'
         RegionFrom = $null; ClaudeCode = $false
         Checks     = @((New-ServiceCheck '/v1beta/models?key=AIzaSyAIDNS-geo-probe-not-a-real-key00'))
         Namespaces = @('generativelanguage.googleapis.com')
@@ -105,24 +114,26 @@ $script:Services = @(
     # Claude Code signs in and exchanges OAuth tokens through platform.claude.com for every account
     # type, shows the login page on claude.com and updates itself from downloads.claude.ai.
     [pscustomobject]@{
-        Id = 'code-login'; Name = 'platform.claude.com'; Domain = 'platform.claude.com'; Weight = 40; Group = 'Support'; Kind = 'Generic'
+        Id = 'code-login'; Mode = 'Preferred'; Name = 'platform.claude.com'; Domain = 'platform.claude.com'; Weight = 40; Group = 'Support'; Kind = 'Generic'
         RegionFrom = $null; ClaudeCode = $true
         Checks     = @((New-ServiceCheck '/cdn-cgi/trace'), (New-ServiceCheck '/' -MaxBytes 65536))
         Namespaces = @('platform.claude.com')
     }
     [pscustomobject]@{
-        Id = 'code-site'; Name = 'claude.com'; Domain = 'claude.com'; Weight = 10; Group = 'Support'; Kind = 'Generic'
+        Id = 'code-site'; Mode = 'Preferred'; Name = 'claude.com'; Domain = 'claude.com'; Weight = 10; Group = 'Support'; Kind = 'Generic'
         RegionFrom = $null; ClaudeCode = $true
         Checks     = @((New-ServiceCheck '/cdn-cgi/trace'), (New-ServiceCheck '/' -MaxBytes 65536))
         Namespaces = @('claude.com', 'www.claude.com')
     }
     [pscustomobject]@{
-        Id = 'code-updates'; Name = 'downloads.claude.ai'; Domain = 'downloads.claude.ai'; Weight = 5; Group = 'Support'; Kind = 'Generic'
+        Id = 'code-updates'; Mode = 'Preferred'; Name = 'downloads.claude.ai'; Domain = 'downloads.claude.ai'; Weight = 5; Group = 'Support'; Kind = 'Generic'
         RegionFrom = $null; ClaudeCode = $true
         Checks     = @((New-ServiceCheck '/cdn-cgi/trace'))
         Namespaces = @('downloads.claude.ai')
     }
 )
+# The table in effect for this run; Use-AiDnsSetting replaces it with the user's modes and domains.
+$script:Services = $script:BuiltInServices
 
 # A well-known domain that every working resolver answers; used to measure latency.
 $script:ProbeDomain = 'ya.ru'
@@ -173,8 +184,10 @@ $script:Paths = [pscustomobject]@{
     Hosts       = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
     Catalog     = Join-Path $PSScriptRoot '..\providers.json'
     Engine      = Join-Path $PSScriptRoot '..\Probe.cs'
+    # Next to the launchers, so Disable and Update, which delete the data directory, never touch it.
+    Settings    = Join-Path $PSScriptRoot '..\..\settings.json'
+    Launcher    = Join-Path $PSScriptRoot '..\..\AI-DNS.ps1'
 }
-$script:Paths.Catalog = [IO.Path]::GetFullPath($script:Paths.Catalog)
-$script:Paths.Engine  = [IO.Path]::GetFullPath($script:Paths.Engine)
+foreach ($name in @('Catalog', 'Engine', 'Settings', 'Launcher')) { $script:Paths.$name = [IO.Path]::GetFullPath($script:Paths.$name) }
 
 $script:LogRetention = 20

@@ -273,6 +273,9 @@ function Get-ProviderCatalog {
         $all += @($feed.Parsed.Providers)
         $retired += @($feed.Parsed.Retired)
     }
+    # Last, so an address that a known provider also lists keeps that provider's name.
+    $own = @((Get-AiDnsSetting).CustomResolvers)
+    if ($own.Count) { $all += @(New-ProviderEntry -Id 'custom' -Name (Get-Text 'Provider.Custom') -Ipv4 $own -Source 'settings') }
     return [pscustomobject]@{
         Providers = @(Merge-ProviderList -Providers $all)
         Retired   = [string[]]@($retired | Select-Object -Unique)

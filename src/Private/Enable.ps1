@@ -24,7 +24,7 @@ function New-Candidate {
 function Get-MostCommonReason {
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Candidates, [Parameter(Mandatory)] $Service)
 
-    $top = @($Candidates | ForEach-Object { Format-Verdict $_.Verdicts[$Service.Id] }) |
+    $top = @($Candidates | Where-Object { $null -ne $_.Verdicts[$Service.Id] } | ForEach-Object { Format-Verdict $_.Verdicts[$Service.Id] }) |
         Group-Object | Sort-Object Count -Descending | Select-Object -First 1
     if ($null -eq $top) { return Get-Text 'Verdict.NoData' }
     return $top.Name
@@ -35,33 +35,52 @@ function Format-Mark {
     if ($Value) { '+' } else { '-' }
 }
 
+<#
+.SYNOPSIS
+    The services to probe: every service that is checked, plus switched-off services that a checked
+    one takes its region from.
+#>
+function Get-ProbedService {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Services)
+
+    $active = @($Services | Where-Object { $_.Mode -ne 'Off' })
+    $ids = @($active | ForEach-Object { $_.Id })
+    $extra = @($Services | Where-Object {
+        $id = $_.Id
+        $ids -notcontains $id -and @($active | Where-Object { $_.RegionFrom -eq $id }).Count -gt 0
+    })
+    return @($active) + @($extra)
+}
+
 function Show-CandidateTable {
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Candidates, [Parameter(Mandatory)] [object[]] $Services)
 
-    $web = @($Services | Where-Object { $_.Group -eq 'Web' })
-    $api = @($Services | Where-Object { $_.Group -eq 'Api' })
-    $code = @($Services | Where-Object { $_.ClaudeCode })
+    $active = @($Services | Where-Object { $_.Mode -ne 'Off' })
+    $gating = @(Get-GatingService $Services)
+    $api = @($active | Where-Object { $_.Group -eq 'Api' })
+    $code = @($active | Where-Object { $_.ClaudeCode })
     Write-RawLine ''
     foreach ($c in @($Candidates | Sort-Object Score -Descending)) {
-        $color = if ($c.WebCount -eq $web.Count) { 'Green' } elseif ($c.WebCount -gt 0) { 'Yellow' } else { 'DarkGray' }
-        $codeOk = @($code | Where-Object { -not $c.Verdicts[$_.Id].Ok }).Count -eq 0
-        $apiOk = @($api | Where-Object { $c.Verdicts[$_.Id].Ok }).Count
+        $color = if ($c.WebCount -eq $gating.Count) { 'Green' } elseif ($c.WebCount -gt 0) { 'Yellow' } else { 'DarkGray' }
         $latency = $null
         if ($null -ne $c.DnsMs) { $latency = $c.DnsMs + $(if ($null -ne $c.TlsMs) { $c.TlsMs } else { 0 }) }
         $latencyText = if ($null -ne $latency) { Get-Text 'Format.Milliseconds' @($latency) } else { '-' }
-        $marks = (@($web | ForEach-Object { '{0} {1}' -f $_.Name, (Format-Mark $c.Verdicts[$_.Id].Ok) }) -join '  ')
-        $line = '  {0,-15} {1,-15} {2}  Claude Code {3}  API {4}/{5}  {6,7}{7}' -f (ConvertTo-SafeText $c.Provider.Name 15),
-            $c.Address, $marks, (Format-Mark $codeOk), $apiOk, $api.Count, $latencyText, $(if ($c.DohTemplate) { '  DoH' } else { '' })
+        $marks = (@($gating | ForEach-Object { '{0} {1}' -f (ConvertTo-SafeText $_.Name 24), (Format-Mark $c.Verdicts[$_.Id].Ok) }) -join '  ')
+        $extras = ''
+        if ($code.Count) { $extras += '  Claude Code {0}' -f (Format-Mark (@($code | Where-Object { -not $c.Verdicts[$_.Id].Ok }).Count -eq 0)) }
+        if ($api.Count) { $extras += '  API {0}/{1}' -f @($api | Where-Object { $c.Verdicts[$_.Id].Ok }).Count, $api.Count }
+        $line = '  {0,-15} {1,-15} {2}{3}  {4,7}{5}' -f (ConvertTo-SafeText $c.Provider.Name 15), $c.Address, $marks, $extras,
+            $latencyText, $(if ($c.DohTemplate) { '  DoH' } else { '' })
         Write-RawLine $line $color 'TEST'
 
-        foreach ($s in $Services) {
+        foreach ($s in $active) {
             $verdict = $c.Verdicts[$s.Id]
             $text = '      {0}: {1}{2}' -f (Get-ServiceLabel $s), $(if ($verdict.Ok) { 'OK, ' } else { '' }), (Format-Verdict $verdict)
-            $visible = -not $verdict.Ok -and $c.WebCount -gt 0 -and ($s.Group -eq 'Web' -or $s.ClaudeCode)
+            $visible = -not $verdict.Ok -and $c.WebCount -gt 0 -and ($gating -contains $s -or $s.ClaudeCode)
             if ($visible) { Write-RawLine $text DarkGray 'TEST' } else { Write-LogRecord 'TEST' $text.Trim() }
         }
         if ($c.WebCount -eq 0) {
-            $reasons = @($web | ForEach-Object { Format-Verdict $c.Verdicts[$_.Id] } | Select-Object -Unique)
+            $reasons = @($gating | ForEach-Object { Format-Verdict $c.Verdicts[$_.Id] } | Select-Object -Unique)
             Write-RawLine ('      ' + ($reasons -join ' / ')) DarkGray 'TEST'
         }
     }
@@ -154,6 +173,93 @@ function Test-SystemResolver {
 
 <#
 .SYNOPSIS
+    Resolves every service through the reference resolvers.
+.OUTPUTS
+    A hashtable mapping each domain to the addresses the reference resolvers returned.
+#>
+function Get-ReferenceAnswer {
+    param([Parameter(Mandatory)] [string[]] $Domains, [AllowEmptyCollection()] [object[]] $ExtraQueries = @())
+
+    $queries = @(foreach ($d in $Domains) { foreach ($r in $script:ReferenceResolvers) { New-DnsQuery $r $d 'reference' } })
+    Invoke-DnsBatch (@($queries) + @($ExtraQueries))
+    $reference = @{}
+    foreach ($d in $Domains) {
+        $reference[$d] = [string[]]@($queries | Where-Object { $_.Name -eq $d -and $_.Ok } | ForEach-Object { $_.Addresses } | Select-Object -Unique)
+    }
+    return $reference
+}
+
+<#
+.SYNOPSIS
+    Explains that a required service left no usable resolver and asks what to do about it.
+.OUTPUTS
+    System.String: Remove, Optional or Exit. Exit without an interactive console.
+#>
+function Read-RequiredFailureChoice {
+    param([Parameter(Mandatory)] [object[]] $Missing, [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Candidates)
+
+    $labels = @($Missing | ForEach-Object { Get-ServiceLabel $_ }) -join ', '
+    Write-RawLine ''
+    Write-FailLine 'Required.NoResolver' $labels
+    foreach ($s in $Missing) { Write-NoteLine 'Plan.CommonReason' (Get-ServiceLabel $s) (Get-MostCommonReason $Candidates $s) }
+    $custom = @($Missing | Where-Object { $_.Group -eq 'Custom' }).Count -gt 0
+    Write-NoteLine $(if ($custom) { 'Required.CustomHint' } else { 'Required.SettingsHint' })
+
+    try {
+        if ([Console]::IsInputRedirected) { return 'Exit' }
+        while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+    }
+    catch { return 'Exit' }
+    Write-RawLine ''
+    Write-RawLine ('  ' + (Get-Text $(if ($custom) { 'Required.KeyRemove' } else { 'Required.KeyOff' }))) White
+    Write-RawLine ('  ' + (Get-Text 'Required.KeyOptional')) White
+    Write-RawLine ('  ' + (Get-Text 'Required.KeyExit')) White
+    while ($true) {
+        $key = [Console]::ReadKey($true).Key
+        $choice = switch ($key) {
+            { $_ -in @('D1', 'NumPad1') } { 'Remove' }
+            { $_ -in @('D2', 'NumPad2') } { 'Optional' }
+            'Escape' { 'Exit' }
+            default { $null }
+        }
+        if ($null -ne $choice) {
+            Write-LogRecord 'INFO' "Required service choice: $choice"
+            return $choice
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Applies the choice made for unreachable required services to the settings and to this run.
+.OUTPUTS
+    The updated service table.
+#>
+function Resolve-RequiredFailure {
+    param([Parameter(Mandatory)] [string] $Choice, [Parameter(Mandatory)] [object[]] $Missing)
+
+    $settings = Get-AiDnsSetting
+    $ids = [string[]]@($Missing | ForEach-Object { $_.Id })
+    if ($Choice -eq 'Remove') { Remove-AiDnsServiceCheck $settings $ids }
+    else { foreach ($id in $ids) { Set-AiDnsServiceMode $settings $id 'Preferred' } }
+    if (Save-AiDnsSetting $settings) { Write-OkLine $(if ($Choice -eq 'Remove') { 'Required.Removed' } else { 'Required.MadeOptional' }) }
+    else { Write-WarnLine 'Required.SaveFailed' $script:Paths.Settings }
+    Use-AiDnsSetting $settings
+    return $script:Services
+}
+
+function Set-BlockingService {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Ids)
+
+    $settings = Get-AiDnsSetting
+    if ((@($settings.Blocking) -join ',') -eq ($Ids -join ',')) { return }
+    $settings.Blocking.Clear()
+    foreach ($id in $Ids) { $settings.Blocking.Add($id) }
+    $null = Save-AiDnsSetting $settings
+}
+
+<#
+.SYNOPSIS
     Runs the enable action.
 .PARAMETER TestOnly
     Stop after ranking; change nothing.
@@ -167,11 +273,13 @@ function Test-SystemResolver {
 function Invoke-AiDnsEnable {
     param([switch] $TestOnly, [switch] $Refresh, [switch] $Offline)
 
-    $services = $script:Services
-    $web = @($services | Where-Object { $_.Group -eq 'Web' })
-    $api = @($services | Where-Object { $_.Group -eq 'Api' })
-    $code = @($services | Where-Object { $_.ClaudeCode })
+    $settings = Get-AiDnsSetting
+    $system = $settings.System
+    $services = @($script:Services)
+    $probed = @(Get-ProbedService $services)
     if ($TestOnly) { Write-WarnLine 'Enable.TestOnly' }
+    $skipped = @($script:SystemToggles | Where-Object { -not $system.$_ } | ForEach-Object { Get-Text "System.$_" })
+    if ($skipped.Count) { Write-NoteLine 'Enable.SystemSkipped' ($skipped -join ', ') }
 
     Write-StepLine 'Step.Prepare'
     $connections = @(Get-NetworkConnection)
@@ -206,34 +314,32 @@ function Invoke-AiDnsEnable {
     }
     $addressCount = @($catalog.Providers | ForEach-Object { $_.Ipv4 } | Select-Object -Unique).Count
     Write-OkLine 'Catalog.Summary' (@($catalog.Providers).Count) $addressCount
+    $providers = @($catalog.Providers | Where-Object { $settings.BlockedProviders -notcontains $_.Id })
 
     Write-StepLine 'Step.Reference'
-    $domains = @($services | ForEach-Object { $_.Domain }) + $script:ProbeDomain
-    $referenceQueries = @(foreach ($d in $domains) { foreach ($r in $script:ReferenceResolvers) { New-DnsQuery $r $d 'reference' } })
-    $discoveryQueries = @(foreach ($p in $catalog.Providers) {
+    $domains = [string[]]@(@($probed | ForEach-Object { $_.Domain }) + $script:ProbeDomain | Select-Object -Unique)
+    $discoveryQueries = @(foreach ($p in $providers) {
         foreach ($h in $p.Hosts) { foreach ($r in $script:ReferenceResolvers[0..1]) { New-DnsQuery $r $h "discover|$($p.Id)" } }
     })
-    Invoke-DnsBatch (@($referenceQueries) + @($discoveryQueries))
-
-    $reference = @{}
-    foreach ($d in $domains) {
-        $reference[$d] = [string[]]@($referenceQueries | Where-Object { $_.Name -eq $d -and $_.Ok } | ForEach-Object { $_.Addresses } |
-            Select-Object -Unique)
-    }
-    $referenced = @($web | Where-Object { @($reference[$_.Domain]).Count -gt 0 }).Count
-    if ($referenced -eq 0) { Write-WarnLine 'Reference.Intercepted' } else { Write-OkLine 'Reference.Received' $referenced $web.Count }
+    $reference = Get-ReferenceAnswer $domains $discoveryQueries
+    $gatingAll = @(Get-GatingService $services)
+    $referenced = @($gatingAll | Where-Object { @($reference[$_.Domain]).Count -gt 0 }).Count
+    if ($referenced -eq 0) { Write-WarnLine 'Reference.Intercepted' } else { Write-OkLine 'Reference.Received' $referenced $gatingAll.Count }
 
     $candidates = [ordered]@{}
-    foreach ($p in $catalog.Providers) {
+    $excluded = 0
+    foreach ($p in $providers) {
         foreach ($ip in $p.Ipv4) {
+            if ($settings.BlockedAddresses -contains $ip) { $excluded++; continue }
             if (-not $candidates.Contains($ip) -and $candidates.Count -lt $script:MaxCandidates) { $candidates[$ip] = New-Candidate $ip $p }
         }
     }
     $discovered = 0
     foreach ($q in @($discoveryQueries | Where-Object { $_.Ok })) {
         $providerId = $q.Tag.Substring('discover|'.Length)
-        $provider = @($catalog.Providers | Where-Object { $_.Id -eq $providerId }) | Select-Object -First 1
+        $provider = @($providers | Where-Object { $_.Id -eq $providerId }) | Select-Object -First 1
         foreach ($ip in $q.Addresses) {
+            if ($settings.BlockedAddresses -contains $ip) { continue }
             if ((Test-PublicIPv4 $ip) -and -not $candidates.Contains($ip) -and $candidates.Count -lt $script:MaxCandidates) {
                 $candidates[$ip] = New-Candidate $ip $provider
                 $discovered++
@@ -241,6 +347,8 @@ function Invoke-AiDnsEnable {
         }
     }
     Write-OkLine 'Reference.Candidates' $candidates.Count $discovered
+    $blockedCount = @($catalog.Providers).Count - $providers.Count
+    if ($blockedCount -gt 0 -or $excluded -gt 0) { Write-NoteLine 'Reference.Excluded' $blockedCount $excluded }
 
     Write-StepLine 'Step.Probe'
     $queries = [Collections.Generic.List[object]]::new()
@@ -249,7 +357,7 @@ function Invoke-AiDnsEnable {
         $samples = @(for ($i = 0; $i -lt $script:Timing.LatencySamples; $i++) { New-DnsQuery $c.Address $script:ProbeDomain 'latency' })
         $latency[$c.Address] = $samples
         foreach ($q in $samples) { $queries.Add($q) }
-        foreach ($s in $services) {
+        foreach ($s in $probed) {
             $q = New-DnsQuery $c.Address $s.Domain $s.Id
             $c.Dns[$s.Id] = $q
             $queries.Add($q)
@@ -272,7 +380,7 @@ function Invoke-AiDnsEnable {
     $probes = [Collections.Generic.List[object]]::new()
     $dohProbes = [Collections.Generic.List[object]]::new()
     foreach ($c in $alive) {
-        foreach ($s in $services) {
+        foreach ($s in $probed) {
             $answer = $c.Dns[$s.Id]
             if (-not $answer.Ok) { continue }
             foreach ($check in $s.Checks) {
@@ -288,18 +396,36 @@ function Invoke-AiDnsEnable {
     Invoke-HttpsBatch $probes.ToArray() $dohProbes.ToArray()
     Write-OkLine 'Https.Done' ($probes.Count + $dohProbes.Count)
 
-    $context = [pscustomobject]@{ Services = $services; Reference = $reference; Https = $https }
+    $context = [pscustomobject]@{ Services = $probed; Reference = $reference; Https = $https }
     foreach ($c in $alive) { Measure-Candidate $c $context $dohProbes.ToArray() }
     Show-CandidateTable $alive $services
 
     $previousState = Read-AiDnsState
     $known = [string[]]@(@(Get-KnownSmartDnsAddress $catalog $previousState) + @($candidates.Keys) | Select-Object -Unique)
-    $plan = Select-AiDnsPlan $alive $services
+    $useNrpt = $system.Nrpt -and (Test-NrptSupport)
+    if ($system.Nrpt -and -not $useNrpt) { Write-NoteLine 'Apply.NoNrpt' }
+    $plan = Select-AiDnsPlan $alive $services -NoRoutes:(-not $useNrpt) -PinnedProvider $settings.PinnedProvider
+
+    while ($null -ne $plan -and @($plan.Missing).Count -gt 0) {
+        Set-BlockingService ([string[]]@($plan.Missing | ForEach-Object { $_.Id }))
+        $choice = Read-RequiredFailureChoice @($plan.Missing) $alive
+        if ($choice -eq 'Exit') {
+            if (-not $TestOnly) { Invoke-DeadDnsRecovery $active ([string[]]@($alive | ForEach-Object { $_.Address })) $known }
+            return 2
+        }
+        $services = @(Resolve-RequiredFailure $choice @($plan.Missing))
+        foreach ($c in $alive) { Update-CandidateScore $c $services }
+        $plan = Select-AiDnsPlan $alive $services -NoRoutes:(-not $useNrpt) -PinnedProvider $settings.PinnedProvider
+    }
+    $gating = @(Get-GatingService $services)
+    $activeServices = @($services | Where-Object { $_.Mode -ne 'Off' })
+    $code = @($activeServices | Where-Object { $_.ClaudeCode })
+    $api = @($activeServices | Where-Object { $_.Group -eq 'Api' })
 
     if ($null -eq $plan) {
         Write-RawLine ''
         Write-FailLine 'Plan.NoneWorks'
-        foreach ($s in $web) { Write-NoteLine 'Plan.CommonReason' (Get-ServiceLabel $s) (Get-MostCommonReason $alive $s) }
+        foreach ($s in $gating) { Write-NoteLine 'Plan.CommonReason' (Get-ServiceLabel $s) (Get-MostCommonReason $alive $s) }
         $filtered = @($alive | ForEach-Object { $_.Verdicts.Values } | Where-Object { $_.Reason -in @('TlsBlocked', 'TlsForged') })
         if ($filtered.Count -gt 0) { Write-WarnLine 'Plan.SniFiltering' }
         if (-not $TestOnly) {
@@ -307,14 +433,17 @@ function Invoke-AiDnsEnable {
         }
         return 2
     }
+    Set-BlockingService ([string[]]@())
 
     Write-RawLine ''
     Write-OkLine 'Plan.Primary' $plan.Primary.Address $plan.Primary.Provider.Name
     if ($null -ne $plan.Secondary) { Write-OkLine 'Plan.Secondary' $plan.Secondary.Address $plan.Secondary.Provider.Name }
+    if ($plan.Pinned -eq 'Used') { Write-NoteLine 'Plan.PinnedUsed' $plan.Primary.Provider.Name }
+    elseif ($plan.Pinned -eq 'Failed') { Write-WarnLine 'Plan.PinnedFailed' $settings.PinnedProvider }
     foreach ($route in $plan.Routes) {
         Write-OkLine 'Plan.Route' (Get-ServiceLabel $route.Service) ($route.Servers -join ', ') $route.Candidates[0].Provider.Name
     }
-    foreach ($s in $web) {
+    foreach ($s in $gating) {
         $routed = @($plan.Routes | Where-Object { $_.Service.Id -eq $s.Id }).Count -gt 0
         if (-not $plan.Primary.Verdicts[$s.Id].Ok -and -not $routed) { Write-WarnLine 'Plan.NotCovered' (Get-ServiceLabel $s) (Get-MostCommonReason $alive $s) }
     }
@@ -358,7 +487,7 @@ function Invoke-AiDnsEnable {
         catch { Write-FailLine 'Adapter.Failed' $c.Alias $_.Exception.Message }
 
         # Smart DNS answers A records only; a working IPv6 path would let AAAA answers from the ISP bypass the proxy.
-        if ((Get-Ipv6BindingState $c.AdapterName) -eq $true) {
+        if ($system.DisableIpv6 -and (Get-Ipv6BindingState $c.AdapterName) -eq $true) {
             try {
                 Set-Ipv6Binding $c.AdapterName $false
                 foreach ($record in @($backup.Adapters | Where-Object { $_.Guid -eq $c.Guid })) { $record.Ipv6DisabledByUs = $true }
@@ -392,10 +521,9 @@ function Invoke-AiDnsEnable {
             catch { Write-FailLine 'Apply.RouteFailed' (Get-ServiceLabel $route.Service) $_.Exception.Message }
         }
     }
-    elseif ($plan.Routes.Count) { Write-WarnLine 'Apply.NoNrpt' }
 
     $dohAdded = [Collections.Generic.List[string]]::new()
-    if (Test-DohSupport) {
+    if ($system.Doh -and (Test-DohSupport)) {
         $withDoh = @(@($plan.Primary, $plan.Secondary) + @($plan.Routes | ForEach-Object { $_.Candidates }) |
             Where-Object { $null -ne $_ -and $_.DohTemplate } | Sort-Object Address -Unique)
         foreach ($c in $withDoh) {
@@ -409,24 +537,28 @@ function Invoke-AiDnsEnable {
         if ($dohAdded.Count) { Write-OkLine 'Apply.Doh' ($dohAdded -join ', ') }
     }
 
-    try {
-        $disabled = Disable-ManagedHostsEntry
-        if ($disabled -gt 0) {
-            $backup.HostsModified = $true
-            Write-OkLine 'Apply.Hosts' $disabled
+    if ($system.Hosts) {
+        try {
+            $disabled = Disable-ManagedHostsEntry
+            if ($disabled -gt 0) {
+                $backup.HostsModified = $true
+                Write-OkLine 'Apply.Hosts' $disabled
+            }
         }
+        catch { Write-WarnLine 'Apply.HostsFailed' $_.Exception.Message }
     }
-    catch { Write-WarnLine 'Apply.HostsFailed' $_.Exception.Message }
 
-    $policyErrors = 0
-    foreach ($policy in $script:BrowserPolicies) {
-        try { Set-BrowserPolicy $policy $backup.Policies }
-        catch {
-            Write-FailLine 'Apply.PolicyFailed' "$($policy.Key)\$($policy.Name)" $_.Exception.Message
-            $policyErrors++
+    if ($system.BrowserPolicies) {
+        $policyErrors = 0
+        foreach ($policy in $script:BrowserPolicies) {
+            try { Set-BrowserPolicy $policy $backup.Policies }
+            catch {
+                Write-FailLine 'Apply.PolicyFailed' "$($policy.Key)\$($policy.Name)" $_.Exception.Message
+                $policyErrors++
+            }
         }
+        if ($policyErrors -eq 0) { Write-OkLine 'Apply.Browsers' }
     }
-    if ($policyErrors -eq 0) { Write-OkLine 'Apply.Browsers' }
 
     Save-AiDnsBackup $backup
     Save-AiDnsState ([pscustomobject]@{
@@ -446,33 +578,34 @@ function Invoke-AiDnsEnable {
         return 0
     }
     Clear-DnsCache
-    $system = Test-SystemResolver $context
+    $systemResult = Test-SystemResolver $context
     $working = 0
-    foreach ($s in $web) {
-        $verdict = $system.Verdicts[$s.Id]
+    foreach ($s in $gating) {
+        $verdict = $systemResult.Verdicts[$s.Id]
         if ($verdict.Ok) {
             Write-OkLine 'Verify.Works' (Get-ServiceLabel $s) (Format-Verdict $verdict)
             $working++
         }
         else { Write-WarnLine 'Verify.Fails' (Get-ServiceLabel $s) (Format-Verdict $verdict) }
     }
-    $codeProblems = @($code | Where-Object { -not $system.Verdicts[$_.Id].Ok })
-    if ($codeProblems.Count -eq 0) { Write-OkLine 'Verify.CodeOk' }
-    else {
+    $codeProblems = @($code | Where-Object { -not $systemResult.Verdicts[$_.Id].Ok })
+    if ($code.Count -and $codeProblems.Count -eq 0) { Write-OkLine 'Verify.CodeOk' }
+    elseif ($codeProblems.Count) {
         Write-WarnLine 'Verify.CodeProblems'
-        foreach ($s in $codeProblems) { Write-NoteLine 'Verify.CodeItem' $s.Domain (Format-Verdict $system.Verdicts[$s.Id]) }
+        foreach ($s in $codeProblems) { Write-NoteLine 'Verify.CodeItem' $s.Domain (Format-Verdict $systemResult.Verdicts[$s.Id]) }
     }
-    $apiWorking = @($api | Where-Object { $system.Verdicts[$_.Id].Ok }).Count
-    Write-NoteLine 'Verify.Api' $apiWorking $api.Count
+    if ($api.Count) { Write-NoteLine 'Verify.Api' @($api | Where-Object { $systemResult.Verdicts[$_.Id].Ok }).Count $api.Count }
+    $requiredFailed = @($activeServices | Where-Object { $_.Mode -eq 'Required' -and -not $systemResult.Verdicts[$_.Id].Ok })
 
     Write-RawLine ''
-    if ($script:Run.Errors -eq 0 -and $working -gt 0) {
-        $suffix = if ($codeProblems.Count) { Get-Text 'Verify.SuffixCodeProblems' } else { Get-Text 'Verify.SuffixCodeOk' }
-        Write-OkLine 'Verify.Done' (Format-ElapsedTime) $working $web.Count $suffix
+    if ($script:Run.Errors -eq 0 -and $working -gt 0 -and $requiredFailed.Count -eq 0) {
+        $suffix = if ($code.Count -eq 0) { '' } elseif ($codeProblems.Count) { Get-Text 'Verify.SuffixCodeProblems' } else { Get-Text 'Verify.SuffixCodeOk' }
+        Write-OkLine 'Verify.Done' (Format-ElapsedTime) $working $gating.Count $suffix
         Write-NoteLine 'Common.RestartBrowser'
         Write-NoteLine 'Verify.HowToUndo'
         return 0
     }
+    if ($requiredFailed.Count) { Write-WarnLine 'Verify.RequiredFails' (@($requiredFailed | ForEach-Object { Get-ServiceLabel $_ }) -join ', ') }
     Write-WarnLine 'Common.CompletedWithIssues' $script:Run.Errors
     return 3
 }

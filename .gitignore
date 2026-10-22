@@ -1,6 +1,10 @@
 # Logs written by the trace and dry-run copies in tests/manual.
 tests/manual/logs/
 
+# Personal settings saved by AI-DNS-Settings.bat, and release archives built by tools/Build-Release.ps1.
+settings.json
+dist/
+
 # Pester and editor output.
 testResults.xml
 coverage.xml

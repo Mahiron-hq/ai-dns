@@ -5,12 +5,15 @@ $script:Strings = @{}
 
 <#
 .SYNOPSIS
-    Resolves the UI language: an explicit choice, otherwise Russian for Russian-speaking Windows, otherwise English.
+    Resolves the UI language: an explicit choice, then the settings, then Russian for Russian-speaking
+    Windows, otherwise English.
 #>
 function Resolve-AiDnsLanguage {
     param([ValidateSet('Auto', 'en', 'ru')] [string] $Language = 'Auto')
 
     if ($Language -ne 'Auto') { return $Language }
+    $configured = (Get-AiDnsSetting).Language
+    if ($configured -ne 'Auto') { return $configured }
     $ui = [Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName
     if ($ui -in @('ru', 'be', 'kk', 'ky', 'tg')) { return 'ru' }
     return 'en'
