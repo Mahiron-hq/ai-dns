@@ -138,6 +138,40 @@ function Remove-DohTemplate {
 
 <#
 .SYNOPSIS
+    Removes the DoH templates this tool registered and still unchanged; reports templates of known
+    smart DNS addresses that it did not register.
+.PARAMETER Owned
+    Objects with Address and Template ($null when an older version did not record it).
+.OUTPUTS
+    System.Int32. The number of templates removed.
+#>
+function Remove-OwnedDohTemplate {
+    param([AllowEmptyCollection()] [object[]] $Owned = @(), [AllowEmptyCollection()] [string[]] $Known = @())
+
+    $removed = 0
+    foreach ($entry in @(Get-DohTemplateEntry)) {
+        $address = [string]$entry.ServerAddress
+        $record = @($Owned | Where-Object { $_.Address -eq $address }) | Select-Object -First 1
+        if ($null -eq $record) {
+            if ($Known -contains $address) { Write-NoteLine 'Disable.DohNotOurs' $address }
+            continue
+        }
+        if ($record.Template -and [string]$entry.DohTemplate -ne $record.Template) {
+            Write-NoteLine 'Disable.DohChanged' $address
+            continue
+        }
+        try {
+            Remove-DohTemplate $address
+            Write-OkLine 'Disable.DohRemoved' $address
+            $removed++
+        }
+        catch { Write-FailLine 'Disable.DohFailed' $address $_.Exception.Message }
+    }
+    return $removed
+}
+
+<#
+.SYNOPSIS
     Returns the registry keys along Path that do not exist yet, outermost first.
 #>
 function Get-MissingRegistryKey {
@@ -167,7 +201,7 @@ function Remove-RegistryKeyIfEmpty {
     run already recorded it, so the original survives repeated enables.
 #>
 function Set-BrowserPolicy {
-    param([Parameter(Mandatory)] $Policy, [Parameter(Mandatory)] [Collections.Generic.List[object]] $Records)
+    param([Parameter(Mandatory)] $Policy, [Parameter(Mandatory)] [AllowEmptyCollection()] [Collections.Generic.List[object]] $Records)
 
     $known = @($Records | Where-Object { $_.Key -eq $Policy.Key -and $_.Name -eq $Policy.Name }).Count -gt 0
     if (-not $known) {
@@ -217,8 +251,9 @@ function Select-ValidPolicyRecord {
 
 <#
 .SYNOPSIS
-    Writes back the recorded policy values, removes values identical to the ones this tool sets
-    that the user did not own, and deletes keys that were created only to hold them.
+    Puts back the values recorded before enable and deletes keys that were created only to hold them.
+    Only values that still hold what this tool set are touched: a value without a record, or one
+    changed after enable, belongs to someone else and is reported instead.
 .OUTPUTS
     System.Int32. The number of values restored or removed.
 #>
@@ -227,47 +262,38 @@ function Restore-BrowserPolicy {
 
     $valid = @(Select-ValidPolicyRecord $Records)
     $changed = 0
-    # In a dry run a removed value is still there, so the leftover pass below must not count it again.
-    $handled = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     for ($i = $valid.Count - 1; $i -ge 0; $i--) {
         $record = $valid[$i]
         $path = "$($record.Key)\$($record.Name)"
+        $policy = @($script:BrowserPolicies | Where-Object { $_.Key -eq $record.Key -and $_.Name -eq $record.Name }) | Select-Object -First 1
+        $current = Get-RegistryValueInfo $record.Key $record.Name
+        if (-not $current.Exists -or "$($current.Value)" -ne "$($policy.Value)") {
+            if ($current.Exists -or $record.ValueExisted) { Write-NoteLine 'Disable.PolicyChanged' $path }
+            continue
+        }
         try {
             if ($record.ValueExisted) {
                 $null = Invoke-SystemChange "Restore policy $path = $(Format-StateValue $record.OldValue)" {
-                    if (-not (Test-Path -LiteralPath $record.Key)) { $null = New-Item -Path $record.Key -Force -ErrorAction Stop }
                     $null = New-ItemProperty -LiteralPath $record.Key -Name $record.Name -PropertyType $record.Type -Value $record.OldValue -Force -ErrorAction Stop
                 }
-                $changed++
             }
-            elseif ((Get-RegistryValueInfo $record.Key $record.Name).Exists) {
+            else {
                 $null = Invoke-SystemChange "Remove policy $path" {
                     Remove-ItemProperty -LiteralPath $record.Key -Name $record.Name -ErrorAction Stop
                 }
-                $null = $handled.Add($path)
-                $changed++
-            }
-        }
-        catch { Write-FailLine 'Policy.RestoreFailed' $path $_.Exception.Message }
-    }
-
-    foreach ($policy in $script:BrowserPolicies) {
-        $owned = @($valid | Where-Object { $_.ValueExisted -and $_.Key -eq $policy.Key -and $_.Name -eq $policy.Name }).Count -gt 0
-        if ($owned) { continue }
-        $current = Get-RegistryValueInfo $policy.Key $policy.Name
-        if (-not $current.Exists -or "$($current.Value)" -ne "$($policy.Value)") { continue }
-        $path = "$($policy.Key)\$($policy.Name)"
-        if ($handled.Contains($path)) { continue }
-        try {
-            $null = Invoke-SystemChange "Remove leftover policy $path" {
-                Remove-ItemProperty -LiteralPath $policy.Key -Name $policy.Name -ErrorAction Stop
             }
             $changed++
         }
         catch { Write-FailLine 'Policy.RestoreFailed' $path $_.Exception.Message }
     }
 
-    $keys = @(@($valid | ForEach-Object { $_.CreatedKeys }) + $script:PolicyParentKeys | Select-Object -Unique |
+    foreach ($policy in $script:BrowserPolicies) {
+        if (@($valid | Where-Object { $_.Key -eq $policy.Key -and $_.Name -eq $policy.Name }).Count -gt 0) { continue }
+        $current = Get-RegistryValueInfo $policy.Key $policy.Name
+        if ($current.Exists -and "$($current.Value)" -eq "$($policy.Value)") { Write-NoteLine 'Disable.PolicyNotOurs' "$($policy.Key)\$($policy.Name)" }
+    }
+
+    $keys = @(@($valid | ForEach-Object { $_.CreatedKeys }) | Where-Object { $_ } | Select-Object -Unique |
         Sort-Object { $_.Length } -Descending)
     foreach ($key in $keys) {
         try { Remove-RegistryKeyIfEmpty $key }

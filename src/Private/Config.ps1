@@ -159,13 +159,6 @@ $script:BrowserPolicies = @(
     [pscustomobject]@{ Key = 'HKLM:\SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS'; Name = 'Enabled';                 Type = 'DWord';  Value = 0 }
     [pscustomobject]@{ Key = 'HKLM:\SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS'; Name = 'Locked';                  Type = 'DWord';  Value = 1 }
 )
-# Parents that may have been created only to hold the policies above, deepest first.
-$script:PolicyParentKeys = @(
-    'HKLM:\SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS', 'HKLM:\SOFTWARE\Policies\Mozilla\Firefox',
-    'HKLM:\SOFTWARE\Policies\Mozilla', 'HKLM:\SOFTWARE\Policies\Google\Chrome', 'HKLM:\SOFTWARE\Policies\Google',
-    'HKLM:\SOFTWARE\Policies\BraveSoftware\Brave', 'HKLM:\SOFTWARE\Policies\BraveSoftware',
-    'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
-)
 
 $script:VirtualAdapterPattern = 'Radmin|Hamachi|ZeroTier|Tailscale|VirtualBox|VMware|Hyper-V|vEthernet|TAP-Windows|Wintun|' +
     'WireGuard|OpenVPN|AmneziaWG|sing-box|Happ|Clash|Xray|v2ray|Npcap|Loopback|Bluetooth'

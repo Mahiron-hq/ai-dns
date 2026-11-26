@@ -63,7 +63,7 @@ Describe 'Module manifest' {
     It 'is valid and exports only the public entry points' {
         $manifest = Test-ModuleManifest (Join-Path $script:SourceRoot 'AIDNS.psd1')
         @($manifest.ExportedFunctions.Keys | Sort-Object) -join ',' |
-            Should -Be 'Invoke-AiDns,Invoke-AiDnsVersionCheck,Request-AiDnsElevation,Start-AiDnsSettingsMenu,Test-AiDnsElevation,Wait-AiDnsExit'
+            Should -Be 'Invoke-AiDns,Invoke-AiDnsVersionCheck,Request-AiDnsElevation,Start-AiDnsSettingsMenu,Test-AiDnsElevation,Test-AiDnsElevationNeeded,Wait-AiDnsExit'
     }
 }
 

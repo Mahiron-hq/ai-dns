@@ -185,9 +185,11 @@ function ConvertFrom-FeedText {
     Ignore the TTL and download every feed.
 .PARAMETER Offline
     Use cached copies only.
+.PARAMETER NoCacheWrite
+    Keep downloaded feeds in memory only.
 #>
 function Get-FeedProvider {
-    param([switch] $Refresh, [switch] $Offline)
+    param([switch] $Refresh, [switch] $Offline, [switch] $NoCacheWrite)
 
     $results = [Collections.Generic.List[object]]::new()
     $pending = [Collections.Generic.List[object]]::new()
@@ -227,8 +229,10 @@ function Get-FeedProvider {
                 $candidate = ConvertFrom-FeedText $feed $hit.Content
                 if (@($candidate.Providers).Count -eq 0) { throw 'no providers' }
                 $parsed = $candidate
-                $null = New-Item -ItemType Directory -Path $script:Paths.Cache -Force
-                [IO.File]::WriteAllText($item.CachePath, $hit.Content, [Text.UTF8Encoding]::new($false))
+                if (-not $NoCacheWrite) {
+                    $null = New-Item -ItemType Directory -Path $script:Paths.Cache -Force
+                    [IO.File]::WriteAllText($item.CachePath, $hit.Content, [Text.UTF8Encoding]::new($false))
+                }
                 break
             }
             catch { Write-TraceLine "feed $($feed.Id): $url rejected: $($_.Exception.Message)" }
@@ -258,12 +262,12 @@ function Get-FeedProvider {
     Throws only when the bundled catalog itself is missing or invalid.
 #>
 function Get-ProviderCatalog {
-    param([switch] $Refresh, [switch] $Offline)
+    param([switch] $Refresh, [switch] $Offline, [switch] $NoCacheWrite)
 
     $bundled = ConvertFrom-ProviderCatalog -Json ([IO.File]::ReadAllText($script:Paths.Catalog)) -Source 'bundled'
     $feeds = @()
     if (-not $Offline -or (Test-Path -LiteralPath $script:Paths.Cache)) {
-        $feeds = @(Get-FeedProvider -Refresh:$Refresh -Offline:$Offline)
+        $feeds = @(Get-FeedProvider -Refresh:$Refresh -Offline:$Offline -NoCacheWrite:$NoCacheWrite)
     }
 
     $all = @($bundled.Providers)

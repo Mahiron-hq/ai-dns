@@ -184,7 +184,7 @@ function Wait-MenuKey {
 function Save-MenuSetting {
     param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $Text)
 
-    if (Save-AiDnsSetting $Settings) { return New-MenuMessage $Text }
+    if (Save-AiDnsSetting $Settings -Explicit) { return New-MenuMessage $Text }
     return New-MenuMessage (Get-Text 'Menu.SaveFailed' @($script:Paths.Settings)) Yellow
 }
 
@@ -487,8 +487,11 @@ function Start-ElevatedAction {
     $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-ProcessArgument $script:Paths.Launcher),
         '-Action', $Action, '-NoUpdateCheck')
     if ($TestOnly) { $arguments += '-TestOnly' }
+    # A test changes nothing, so it runs without the UAC prompt.
+    $elevation = @{}
+    if (Test-AiDnsElevationNeeded -Action $Action -TestOnly:$TestOnly) { $elevation.Verb = 'RunAs' }
     try {
-        $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Verb RunAs -Wait -PassThru -ErrorAction Stop
+        $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments @elevation -Wait -PassThru -ErrorAction Stop
         return $process.ExitCode
     }
     catch [InvalidOperationException] { return 1223 }

@@ -5,10 +5,14 @@
     Loads the probe engine, compiling Probe.cs on first use. The compiled assembly is cached in the
     administrator-only data directory under a name derived from the source hash, so an edited
     Probe.cs is recompiled automatically.
+.PARAMETER InMemory
+    Never write the cache; a cached assembly is still used when present.
 .OUTPUTS
     None. Throws when the engine can be neither loaded nor compiled.
 #>
 function Initialize-ProbeEngine {
+    param([switch] $InMemory)
+
     if ($null -ne ('AiDns.DnsBatch' -as [type])) { return }
 
     $source = [IO.File]::ReadAllText($script:Paths.Engine)
@@ -17,7 +21,7 @@ function Initialize-ProbeEngine {
     $hash = -join ($digest[0..5] | ForEach-Object { $_.ToString('x2') })
     $dll = Join-Path $script:Paths.Cache "probe_$hash.dll"
     # Without elevation the administrator-only cache cannot be written, so the engine is compiled in memory.
-    if (-not (Test-AiDnsElevation)) {
+    if ($InMemory -or -not (Test-AiDnsElevation)) {
         if (Test-Path -LiteralPath $dll -PathType Leaf) {
             try { Add-Type -Path $dll -ErrorAction Stop; return }
             catch { Write-TraceLine "engine: cached assembly rejected: $($_.Exception.Message)" }

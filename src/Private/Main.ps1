@@ -44,6 +44,22 @@ function Test-AiDnsElevation {
     ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+<#
+.SYNOPSIS
+    Tests whether an action needs administrator rights. Status, Settings and a test-only Enable
+    (from the switch or from settings.json) change nothing and run without them.
+#>
+function Test-AiDnsElevationNeeded {
+    param(
+        [Parameter(Mandatory)] [ValidateSet('Enable', 'Disable', 'Update', 'Status', 'Settings')] [string] $Action,
+        [switch] $TestOnly
+    )
+
+    if ($Action -in @('Status', 'Settings')) { return $false }
+    if ($Action -eq 'Enable' -and ($TestOnly -or (Test-SettingFlag (Get-AiDnsSetting) 'TestOnly' 'Enable'))) { return $false }
+    return $true
+}
+
 # Quotes one argument for the Windows command-line parser, including backslashes before quotes.
 function ConvertTo-ProcessArgument {
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Value)
@@ -225,11 +241,12 @@ function Invoke-AiDns {
 
     $exitCode = 1
     try {
-        if ($Action -ne 'Status' -and -not (Test-AiDnsElevation)) { throw (Get-Text 'Error.NotElevated') }
+        $elevationNeeded = Test-AiDnsElevationNeeded -Action $Action -TestOnly:$TestOnly
+        if ($elevationNeeded -and -not (Test-AiDnsElevation)) { throw (Get-Text 'Error.NotElevated') }
         if ($null -ne $optionError) { throw $optionError }
 
-        # Status runs without elevation and so cannot secure the data directory; it logs only where asked to.
-        if ($Action -ne 'Status') {
+        # Status and a test write nothing, the data directory included; they log only where asked to.
+        if ($elevationNeeded) {
             Initialize-DataDirectory
             Open-AiDnsLog
         }

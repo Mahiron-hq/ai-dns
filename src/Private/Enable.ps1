@@ -108,19 +108,32 @@ function Invoke-DeadDnsRecovery {
     Write-WarnLine 'Recovery.Restoring'
     $backup = $null
     try { $backup = Read-AiDnsBackup } catch { Write-WarnLine 'Backup.Corrupt' $_.Exception.Message }
+    $state = Read-AiDnsState
+    $stateServers = if ($null -ne $state) { [string[]]@($state.Servers) } else { [string[]]@() }
     foreach ($c in $broken) {
         $record = if ($null -ne $backup) { @($backup.Adapters | Where-Object { $_.Guid -eq $c.Guid }) | Select-Object -First 1 } else { $null }
-        $static = @()
-        if ($null -ne $record) { $static = @(ConvertTo-AddressList $record.StaticV4) + @(ConvertTo-AddressList $record.StaticV6) }
-        $static = [string[]]@($static | Where-Object { $_ -and $KnownAddresses -notcontains $_ })
+        $current = [string[]]@(Get-AdapterDnsServer $c.Index)
+        $action = Get-AdapterRollbackAction -Record $record -Current $current -StateServers $stateServers -Known $KnownAddresses -HasBackup:($null -ne $backup)
+        if ($action -eq 'Changed') {
+            Write-NoteLine 'Adapter.Changed' $c.Alias (Format-AddressList $current)
+            continue
+        }
+        if ($action -notin @('Restore', 'Reset')) {
+            Write-WarnLine 'Adapter.NotOurs' $c.Alias (Format-AddressList $current)
+            continue
+        }
+        $static = [string[]]@()
+        if ($action -eq 'Restore') { $static = [string[]]@(@(ConvertTo-AddressList $record.StaticV4) + @(ConvertTo-AddressList $record.StaticV6)) }
         try {
             Restore-AdapterDnsServer $c.Index $c.Alias $static
             Write-OkLine 'Recovery.Restored' $c.Alias (Format-AddressList $static)
         }
         catch { Write-FailLine 'Adapter.Failed' $c.Alias $_.Exception.Message }
     }
-    foreach ($rule in @(Get-AiDnsNrptRule)) {
-        try { Remove-AiDnsNrptRule $rule } catch { Write-FailLine 'Nrpt.RemoveFailed' $rule.Name $_.Exception.Message }
+    if ((Get-AiDnsSetting).System.Nrpt) {
+        foreach ($rule in @(Get-AiDnsNrptRule)) {
+            try { Remove-AiDnsNrptRule $rule } catch { Write-FailLine 'Nrpt.RemoveFailed' $rule.Name $_.Exception.Message }
+        }
     }
     Clear-DnsCache
 }
@@ -242,20 +255,104 @@ function Resolve-RequiredFailure {
     $ids = [string[]]@($Missing | ForEach-Object { $_.Id })
     if ($Choice -eq 'Remove') { Remove-AiDnsServiceCheck $settings $ids }
     else { foreach ($id in $ids) { Set-AiDnsServiceMode $settings $id 'Preferred' } }
-    if (Save-AiDnsSetting $settings) { Write-OkLine $(if ($Choice -eq 'Remove') { 'Required.Removed' } else { 'Required.MadeOptional' }) }
+    if (Save-AiDnsSetting $settings -Explicit) { Write-OkLine $(if ($Choice -eq 'Remove') { 'Required.Removed' } else { 'Required.MadeOptional' }) }
     else { Write-WarnLine 'Required.SaveFailed' $script:Paths.Settings }
     Use-AiDnsSetting $settings
     return $script:Services
 }
 
 function Set-BlockingService {
-    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Ids)
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Ids, [switch] $ReadOnly)
 
+    if ($ReadOnly) { return }
     $settings = Get-AiDnsSetting
     if ((@($settings.Blocking) -join ',') -eq ($Ids -join ',')) { return }
     $settings.Blocking.Clear()
     foreach ($id in $Ids) { $settings.Blocking.Add($id) }
     $null = Save-AiDnsSetting $settings
+}
+
+<#
+.SYNOPSIS
+    Explains that backup.json cannot be read and asks whether to set it aside and start a new one.
+    Without an interactive console the answer is no.
+.OUTPUTS
+    System.Boolean. True when the damaged file was set aside and enable may continue.
+#>
+function Confirm-DamagedBackup {
+    param([Parameter(Mandatory)] [string] $Problem)
+
+    Write-WarnLine 'Backup.Corrupt' $Problem
+    Write-NoteLine 'Backup.CorruptExplain'
+    $aside = Join-Path $script:Paths.Root ('backup.broken-{0:yyyyMMdd_HHmmss}.json' -f (Get-Date))
+    $proceed = $false
+    if (Test-InteractiveConsole) {
+        while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+        Write-RawLine ''
+        Write-RawLine ('  ' + (Get-Text 'Backup.CorruptKeys' @($aside))) White
+        while ($true) {
+            $key = [Console]::ReadKey($true).Key
+            if ($key -eq 'Enter') { $proceed = $true; break }
+            if ($key -eq 'Escape') { break }
+        }
+    }
+    if (-not $proceed) {
+        Write-FailLine 'Backup.CorruptStopped' $script:Paths.Backup
+        return $false
+    }
+    $null = Invoke-SystemChange "Move $($script:Paths.Backup) to $aside" { Move-Item -LiteralPath $script:Paths.Backup -Destination $aside -ErrorAction Stop }
+    Write-NoteLine 'Backup.CorruptMoved' $aside
+    return $true
+}
+
+<#
+.SYNOPSIS
+    Records an adapter's DNS configuration as it is before the first change.
+.PARAMETER PreviousState
+    state.json of the last enable. Static servers equal to what it applied are leftovers of a run
+    whose backup is gone, so the original is unknown and DHCP is assumed.
+#>
+function New-AdapterBackupRecord {
+    param([Parameter(Mandatory)] $Connection, [AllowNull()] $PreviousState)
+
+    $v4 = [string[]]@(Get-AdapterStaticServer $Connection.Guid 4)
+    $v6 = [string[]]@(Get-AdapterStaticServer $Connection.Guid 6)
+    if ($null -ne $PreviousState -and $v4.Count -gt 0 -and (Test-SameAddressSet $v4 @($PreviousState.Servers))) { $v4 = [string[]]@() }
+    $ipv6 = Get-Ipv6BindingState $Connection.AdapterName
+    [pscustomobject]@{
+        Guid = $Connection.Guid; Name = $Connection.AdapterName; StaticV4 = ($v4 -join ','); StaticV6 = ($v6 -join ',')
+        IPv6Enabled = ($ipv6 -eq $true); Ipv6DisabledByUs = $false; AppliedV4 = ''
+    }
+}
+
+<#
+.SYNOPSIS
+    Replaces the AI-DNS NRPT rules with the plan's routes. With NRPT switched off nothing is touched,
+    and rules left by an earlier run are only reported.
+.OUTPUTS
+    System.String[]. The ids of the services routed.
+#>
+function Update-AiDnsNrptRule {
+    param([switch] $Enabled, [AllowEmptyCollection()] [object[]] $Routes = @())
+
+    $added = [Collections.Generic.List[string]]::new()
+    if (-not $Enabled) {
+        $stale = @(Get-AiDnsNrptRule)
+        if ($stale.Count) { Write-NoteLine 'Apply.NrptStale' $stale.Count }
+        return , $added.ToArray()
+    }
+    foreach ($rule in @(Get-AiDnsNrptRule)) {
+        try { Remove-AiDnsNrptRule $rule } catch { Write-FailLine 'Nrpt.RemoveFailed' $rule.Name $_.Exception.Message }
+    }
+    foreach ($route in $Routes) {
+        try {
+            Add-AiDnsNrptRule $route.Namespaces $route.Servers
+            $added.Add($route.Service.Id)
+            Write-OkLine 'Apply.Route' (Get-ServiceLabel $route.Service) ($route.Servers -join ', ')
+        }
+        catch { Write-FailLine 'Apply.RouteFailed' (Get-ServiceLabel $route.Service) $_.Exception.Message }
+    }
+    return , $added.ToArray()
 }
 
 <#
@@ -277,6 +374,8 @@ function Invoke-AiDnsEnable {
     $system = $settings.System
     $services = @($script:Services)
     $probed = @(Get-ProbedService $services)
+    # A test or a dry run writes nothing but the log: no cached engine, feeds or settings.
+    $readOnly = $TestOnly -or $script:Run.DryRun
     if ($TestOnly) { Write-WarnLine 'Enable.TestOnly' }
     $skipped = @($script:SystemToggles | Where-Object { -not $system.$_ } | ForEach-Object { Get-Text "System.$_" })
     if ($skipped.Count) { Write-NoteLine 'Enable.SystemSkipped' ($skipped -join ', ') }
@@ -294,7 +393,7 @@ function Invoke-AiDnsEnable {
     $vpn = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match $script:VpnProcessPattern } |
         ForEach-Object { $_.ProcessName } | Select-Object -Unique)
     foreach ($name in $vpn) { Write-WarnLine 'Prepare.VpnRunning' $name }
-    try { Initialize-ProbeEngine }
+    try { Initialize-ProbeEngine -InMemory:$readOnly }
     catch {
         Write-FailLine 'Prepare.EngineFailed' $_.Exception.Message
         return 1
@@ -302,7 +401,7 @@ function Invoke-AiDnsEnable {
     Write-OkLine 'Prepare.EngineReady'
 
     Write-StepLine 'Step.Catalog'
-    $catalog = Get-ProviderCatalog -Refresh:$Refresh -Offline:$Offline
+    $catalog = Get-ProviderCatalog -Refresh:$Refresh -Offline:$Offline -NoCacheWrite:$readOnly
     foreach ($feed in $catalog.Feeds) {
         $count = if ($null -ne $feed.Parsed) { @($feed.Parsed.Providers).Count } else { 0 }
         switch ($feed.Origin) {
@@ -407,7 +506,7 @@ function Invoke-AiDnsEnable {
     $plan = Select-AiDnsPlan $alive $services -NoRoutes:(-not $useNrpt) -PinnedProvider $settings.PinnedProvider
 
     while ($null -ne $plan -and @($plan.Missing).Count -gt 0) {
-        Set-BlockingService ([string[]]@($plan.Missing | ForEach-Object { $_.Id }))
+        Set-BlockingService ([string[]]@($plan.Missing | ForEach-Object { $_.Id })) -ReadOnly:$readOnly
         $choice = Read-RequiredFailureChoice @($plan.Missing) $alive
         if ($choice -eq 'Exit') {
             if (-not $TestOnly) { Invoke-DeadDnsRecovery $active ([string[]]@($alive | ForEach-Object { $_.Address })) $known }
@@ -433,7 +532,7 @@ function Invoke-AiDnsEnable {
         }
         return 2
     }
-    Set-BlockingService ([string[]]@())
+    Set-BlockingService ([string[]]@()) -ReadOnly:$readOnly
 
     Write-RawLine ''
     Write-OkLine 'Plan.Primary' $plan.Primary.Address $plan.Primary.Provider.Name
@@ -460,20 +559,22 @@ function Invoke-AiDnsEnable {
 
     Write-StepLine 'Step.Backup'
     $backup = $null
-    try { $backup = Read-AiDnsBackup } catch { Write-WarnLine 'Backup.Corrupt' $_.Exception.Message }
+    try { $backup = Read-AiDnsBackup }
+    catch {
+        if (-not (Confirm-DamagedBackup $_.Exception.Message)) { return 1 }
+    }
     if ($null -eq $backup) { $backup = New-AiDnsBackup } else { Write-NoteLine 'Backup.Kept' $backup.Created }
     foreach ($c in $active) {
         if (@($backup.Adapters | Where-Object { $_.Guid -eq $c.Guid }).Count -gt 0) { continue }
-        $v4 = @(Get-AdapterStaticServer $c.Guid 4)
-        $v6 = @(Get-AdapterStaticServer $c.Guid 6)
-        # Static servers that are already ours are leftovers of an unrecorded run, not the user's configuration.
-        if (@($v4 | Where-Object { $known -contains $_ }).Count -gt 0) { $v4 = @() }
-        $ipv6 = Get-Ipv6BindingState $c.AdapterName
-        $backup.Adapters.Add([pscustomobject]@{
-            Guid = $c.Guid; Name = $c.AdapterName; StaticV4 = ($v4 -join ','); StaticV6 = ($v6 -join ',')
-            IPv6Enabled = ($ipv6 -eq $true); Ipv6DisabledByUs = $false
-        })
-        if ($v4.Count) { Write-OkLine 'Backup.Static' $c.Alias ($v4 -join ', ') } else { Write-OkLine 'Backup.Dhcp' $c.Alias }
+        $record = New-AdapterBackupRecord $c $previousState
+        $backup.Adapters.Add($record)
+        if ($record.StaticV4) { Write-OkLine 'Backup.Static' $c.Alias ($record.StaticV4 -replace ',', ', ') } else { Write-OkLine 'Backup.Dhcp' $c.Alias }
+    }
+    # Templates registered by 3.1.0 and earlier are recorded only in state.json, which this run replaces.
+    foreach ($address in @(if ($null -ne $previousState) { $previousState.DohAdded })) {
+        if (@($backup.Doh | Where-Object { $_.Address -eq $address }).Count -gt 0) { continue }
+        $entry = @(Get-DohTemplateEntry $address) | Select-Object -First 1
+        if ($null -ne $entry) { $backup.Doh.Add([pscustomobject]@{ Address = $address; Template = [string]$entry.DohTemplate }) }
     }
     Save-AiDnsBackup $backup
     Write-OkLine 'Backup.Saved' $script:Paths.Backup
@@ -482,6 +583,7 @@ function Invoke-AiDnsEnable {
     foreach ($c in $active) {
         try {
             Set-AdapterDnsServer $c.Index $c.Alias $plan.Servers
+            foreach ($record in @($backup.Adapters | Where-Object { $_.Guid -eq $c.Guid })) { $record.AppliedV4 = $plan.Servers -join ',' }
             Write-OkLine 'Apply.Dns' $c.Alias ($plan.Servers -join ', ')
         }
         catch { Write-FailLine 'Adapter.Failed' $c.Alias $_.Exception.Message }
@@ -498,43 +600,43 @@ function Invoke-AiDnsEnable {
     }
     Save-AiDnsBackup $backup
 
+    # Adapters without a gateway or virtual ones: put back only what an earlier run of AI-DNS set on them.
     foreach ($c in @($connections | Where-Object { $active -notcontains $_ })) {
-        if (@(Get-AdapterDnsServer $c.Index | Where-Object { $known -contains $_ }).Count -eq 0) { continue }
+        $record = @($backup.Adapters | Where-Object { $_.Guid -eq $c.Guid }) | Select-Object -First 1
+        $current = [string[]]@(Get-AdapterDnsServer $c.Index)
+        $action = Get-AdapterRollbackAction -Record $record -Current $current -Known $known -HasBackup
+        if ($action -eq 'NotOurs') { Write-NoteLine 'Adapter.NotOurs' $c.Alias (Format-AddressList $current) }
+        if ($action -ne 'Restore') { continue }
         try {
-            Restore-AdapterDnsServer $c.Index $c.Alias
+            Restore-AdapterDnsServer $c.Index $c.Alias ([string[]]@(@(ConvertTo-AddressList $record.StaticV4) + @(ConvertTo-AddressList $record.StaticV6)))
+            $record.AppliedV4 = ''
             Write-OkLine 'Apply.LeftoverRemoved' $c.Alias
         }
         catch { Write-FailLine 'Adapter.Failed' $c.Alias $_.Exception.Message }
     }
 
-    $nrptAdded = [Collections.Generic.List[string]]::new()
-    if (Test-NrptSupport) {
-        foreach ($rule in @(Get-AiDnsNrptRule)) {
-            try { Remove-AiDnsNrptRule $rule } catch { Write-FailLine 'Nrpt.RemoveFailed' $rule.Name $_.Exception.Message }
-        }
-        foreach ($route in $plan.Routes) {
-            try {
-                Add-AiDnsNrptRule $route.Namespaces $route.Servers
-                $nrptAdded.Add($route.Service.Id)
-                Write-OkLine 'Apply.Route' (Get-ServiceLabel $route.Service) ($route.Servers -join ', ')
-            }
-            catch { Write-FailLine 'Apply.RouteFailed' (Get-ServiceLabel $route.Service) $_.Exception.Message }
-        }
-    }
+    $nrptAdded = @(Update-AiDnsNrptRule -Enabled:$useNrpt -Routes @($plan.Routes))
 
     $dohAdded = [Collections.Generic.List[string]]::new()
     if ($system.Doh -and (Test-DohSupport)) {
         $withDoh = @(@($plan.Primary, $plan.Secondary) + @($plan.Routes | ForEach-Object { $_.Candidates }) |
             Where-Object { $null -ne $_ -and $_.DohTemplate } | Sort-Object Address -Unique)
         foreach ($c in $withDoh) {
+            # An existing template is left alone: either ours from an earlier run, or someone else's.
             if (@(Get-DohTemplateEntry $c.Address).Count -gt 0) { continue }
             try {
                 Add-DohTemplate $c.Address $c.DohTemplate
                 $dohAdded.Add($c.Address)
+                if (@($backup.Doh | Where-Object { $_.Address -eq $c.Address }).Count -eq 0) {
+                    $backup.Doh.Add([pscustomobject]@{ Address = $c.Address; Template = $c.DohTemplate })
+                }
             }
             catch { Write-NoteLine 'Apply.DohSkipped' $c.Address $_.Exception.Message }
         }
-        if ($dohAdded.Count) { Write-OkLine 'Apply.Doh' ($dohAdded -join ', ') }
+        if ($dohAdded.Count) {
+            Save-AiDnsBackup $backup
+            Write-OkLine 'Apply.Doh' ($dohAdded -join ', ')
+        }
     }
 
     if ($system.Hosts) {
@@ -567,7 +669,7 @@ function Invoke-AiDnsEnable {
         Servers         = $plan.Servers
         Primary         = $plan.Primary.Address
         PrimaryProvider = $plan.Primary.Provider.Name
-        Nrpt            = $nrptAdded.ToArray()
+        Nrpt            = [string[]]$nrptAdded
         DohAdded        = $dohAdded.ToArray()
         AllCandidateIps = $known
     })

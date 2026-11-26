@@ -14,4 +14,4 @@ foreach ($name in $privateFiles) {
 }
 
 Export-ModuleMember -Function 'Invoke-AiDns', 'Test-AiDnsElevation', 'Request-AiDnsElevation', 'Wait-AiDnsExit',
-    'Invoke-AiDnsVersionCheck', 'Start-AiDnsSettingsMenu'
+    'Invoke-AiDnsVersionCheck', 'Start-AiDnsSettingsMenu', 'Test-AiDnsElevationNeeded'

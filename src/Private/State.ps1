@@ -1,7 +1,7 @@
 # backup.json (the pre-change snapshot) and state.json (what the last enable applied).
 # Field names are kept from the 2.x format so a machine enabled by 2.x can be rolled back by 3.x.
 
-$script:BackupSchemaVersion = 3
+$script:BackupSchemaVersion = 4
 
 function Test-DnsServerAddress {
     param([AllowNull()] [AllowEmptyString()] [string] $Address)
@@ -32,8 +32,92 @@ function New-AiDnsBackup {
         Computer      = $env:COMPUTERNAME
         Adapters      = [Collections.Generic.List[object]]::new()
         Policies      = [Collections.Generic.List[object]]::new()
+        Doh           = [Collections.Generic.List[object]]::new()
         HostsModified = $false
     }
+}
+
+<#
+.SYNOPSIS
+    Tests whether two address lists hold the same addresses, ignoring order and duplicates.
+#>
+function Test-SameAddressSet {
+    param([AllowNull()] [AllowEmptyCollection()] [string[]] $First, [AllowNull()] [AllowEmptyCollection()] [string[]] $Second)
+
+    $a = @(@($First) | Where-Object { $_ } | Sort-Object -Unique)
+    $b = @(@($Second) | Where-Object { $_ } | Sort-Object -Unique)
+    return ($a -join ',') -eq ($b -join ',')
+}
+
+<#
+.SYNOPSIS
+    Decides what a rollback may do with one adapter, from what AI-DNS recorded about it.
+.PARAMETER Record
+    The adapter's backup record, or $null when AI-DNS has none.
+.PARAMETER Current
+    The IPv4 DNS servers the adapter uses now.
+.PARAMETER StateServers
+    The servers the last enable applied, from state.json.
+.PARAMETER Known
+    Every address AI-DNS may have configured.
+.PARAMETER HasBackup
+    A readable backup exists, so a missing record means AI-DNS never changed the adapter.
+.OUTPUTS
+    System.String. Restore (put the recorded original back), Reset (DHCP), Changed (changed by
+    someone else after enable), NotOurs (looks like a smart DNS without proof that AI-DNS set it) or None.
+#>
+function Get-AdapterRollbackAction {
+    param(
+        [AllowNull()] $Record,
+        [AllowNull()] [AllowEmptyCollection()] [string[]] $Current = @(),
+        [AllowNull()] [AllowEmptyCollection()] [string[]] $StateServers = @(),
+        [AllowNull()] [AllowEmptyCollection()] [string[]] $Known = @(),
+        [switch] $HasBackup,
+        [switch] $Full
+    )
+
+    $Current = @($Current | Where-Object { $_ })
+    $StateServers = @($StateServers | Where-Object { $_ })
+    $Known = @($Known | Where-Object { $_ })
+    $ours = @($Current | Where-Object { $Known -contains $_ })
+    if ($null -ne $Record) {
+        if ($Full) { return 'Restore' }
+        $applied = @(ConvertTo-AddressList $Record.AppliedV4)
+        if ($applied.Count -gt 0) {
+            if (Test-SameAddressSet $Current $applied) { return 'Restore' }
+            return 'Changed'
+        }
+        # Backups written before 3.1.1 do not say what was applied; only smart DNS servers count as ours.
+        if ($Current.Count -gt 0 -and $ours.Count -eq $Current.Count) { return 'Restore' }
+        return 'Changed'
+    }
+    if ($Current.Count -eq 0) { return 'None' }
+    if ($Full) { return 'Reset' }
+    if (-not $HasBackup -and $StateServers.Count -gt 0 -and (Test-SameAddressSet $Current $StateServers)) { return 'Reset' }
+    if ($ours.Count -gt 0) { return 'NotOurs' }
+    return 'None'
+}
+
+<#
+.SYNOPSIS
+    The DoH templates AI-DNS registered: the backup records, plus the addresses an older state.json
+    listed, whose template was not recorded.
+.OUTPUTS
+    Objects with Address and Template ($null when unknown).
+#>
+function Get-OwnedDohRecord {
+    param([AllowNull()] $Backup, [AllowNull()] $State)
+
+    $owned = [Collections.Generic.List[object]]::new()
+    if ($null -ne $Backup) { foreach ($record in @($Backup.Doh)) { $owned.Add($record) } }
+    if ($null -ne $State) {
+        foreach ($address in @($State.DohAdded)) {
+            if (@($owned | Where-Object { $_.Address -eq $address }).Count -eq 0) {
+                $owned.Add([pscustomobject]@{ Address = $address; Template = $null })
+            }
+        }
+    }
+    return , $owned.ToArray()
 }
 
 <#
@@ -60,9 +144,17 @@ function Read-AiDnsBackup {
             StaticV6         = (ConvertTo-AddressList (Get-JsonProperty $entry 'StaticV6' '')) -join ','
             IPv6Enabled      = [bool](Get-JsonProperty $entry 'IPv6Enabled' $true)
             Ipv6DisabledByUs = [bool](Get-JsonProperty $entry 'Ipv6DisabledByUs' $false)
+            AppliedV4        = (ConvertTo-AddressList (Get-JsonProperty $entry 'AppliedV4' '')) -join ','
         })
     }
     foreach ($record in @(Select-ValidPolicyRecord @(Get-JsonProperty $raw 'Policies' @()))) { $backup.Policies.Add($record) }
+    foreach ($entry in @(Get-JsonProperty $raw 'Doh' @())) {
+        $address = [string](Get-JsonProperty $entry 'Address' '')
+        $template = ConvertTo-DohTemplate ([string](Get-JsonProperty $entry 'Template' ''))
+        if ((Test-PublicIPv4 $address) -and $null -ne $template -and @($backup.Doh | Where-Object { $_.Address -eq $address }).Count -eq 0) {
+            $backup.Doh.Add([pscustomobject]@{ Address = $address; Template = $template })
+        }
+    }
     return $backup
 }
 
@@ -75,6 +167,7 @@ function Save-AiDnsBackup {
         Computer      = $Backup.Computer
         Adapters      = @($Backup.Adapters)
         Policies      = @($Backup.Policies)
+        Doh           = @($Backup.Doh)
         HostsModified = $Backup.HostsModified
     }
     $null = Invoke-SystemChange "Write $($script:Paths.Backup)" { Write-JsonFile $script:Paths.Backup $document }

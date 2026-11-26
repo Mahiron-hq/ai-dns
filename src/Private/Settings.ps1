@@ -56,6 +56,16 @@ function ConvertTo-ServiceMode {
     return $null
 }
 
+# A whole number that fits Int32, or $null: [int] on a large or fractional JSON number throws or rounds.
+function ConvertTo-SettingInteger {
+    param([AllowNull()] $Value)
+
+    if ($null -eq $Value -or $Value -is [bool] -or $Value -isnot [ValueType]) { return $null }
+    try { $number = [decimal]$Value } catch { return $null }
+    if ($number -ne [decimal]::Truncate($number) -or $number -lt [int]::MinValue -or $number -gt [int]::MaxValue) { return $null }
+    return [int]$number
+}
+
 # Only a JSON boolean counts: in PowerShell the string "false" would convert to $true.
 function ConvertTo-SettingBool {
     param([AllowNull()] $Value, [Parameter(Mandatory)] [bool] $Default)
@@ -155,8 +165,8 @@ function ConvertFrom-AiDnsSettingsDocument {
     if ($language -in @('Auto', 'en', 'ru')) { $settings.Language = @('Auto', 'en', 'ru') | Where-Object { $_ -eq $language } }
     $directory = [string](Get-JsonProperty $Document 'logDirectory' '')
     if ($directory.IndexOfAny([IO.Path]::GetInvalidPathChars()) -lt 0) { $settings.LogDirectory = $directory.Trim() }
-    $wait = Get-JsonProperty $Document 'waitSeconds' 20
-    if ($wait -is [ValueType] -and $script:WaitChoices -contains [int]$wait) { $settings.WaitSeconds = [int]$wait }
+    $wait = ConvertTo-SettingInteger (Get-JsonProperty $Document 'waitSeconds' 20)
+    if ($null -ne $wait -and $script:WaitChoices -contains $wait) { $settings.WaitSeconds = $wait }
     $settings.CheckUpdates = ConvertTo-SettingBool (Get-JsonProperty $Document 'checkUpdates') $true
     $dismissed = [string](Get-JsonProperty $Document 'dismissedVersion' '')
     if ($dismissed -match '^\d+(\.\d+){1,3}$') { $settings.DismissedVersion = $dismissed }
@@ -225,17 +235,24 @@ function ConvertTo-AiDnsSettingsDocument {
 <#
 .SYNOPSIS
     Returns the settings of this copy, reading settings.json on first use. A damaged file yields the
-    defaults and is described in $script:SettingsProblem.
+    defaults and is described in $script:SettingsProblem; this function never throws.
 #>
 function Get-AiDnsSetting {
     param([switch] $Reload)
 
     if ($null -ne $script:Settings -and -not $Reload) { return $script:Settings }
     $script:SettingsProblem = $null
-    $document = $null
-    try { $document = Read-JsonFile $script:Paths.Settings }
-    catch { $script:SettingsProblem = $_.Exception.Message }
-    $script:Settings = ConvertFrom-AiDnsSettingsDocument $document
+    try {
+        $document = Read-JsonFile $script:Paths.Settings
+        if ($null -ne $document -and $document -isnot [Management.Automation.PSCustomObject]) {
+            throw 'The file does not contain a JSON object.'
+        }
+        $script:Settings = ConvertFrom-AiDnsSettingsDocument $document
+    }
+    catch {
+        $script:SettingsProblem = $_.Exception.Message
+        $script:Settings = New-AiDnsSetting
+    }
     return $script:Settings
 }
 
@@ -243,13 +260,24 @@ function Get-AiDnsSetting {
 .SYNOPSIS
     Writes the settings to settings.json. Settings belong to the user, not to the system, so this is
     not a system change and also happens in a dry run.
+.PARAMETER Explicit
+    The user changed a setting on purpose. Only then is a damaged settings.json replaced, and a copy
+    of it is kept next to it first; automatic saves leave a damaged file alone.
 .OUTPUTS
-    System.Boolean. False when the file could not be written; the reason is traced.
+    System.Boolean. False when the file was not written; the reason is traced.
 #>
 function Save-AiDnsSetting {
-    param([Parameter(Mandatory)] $Settings)
+    param([Parameter(Mandatory)] $Settings, [switch] $Explicit)
 
+    if ($null -ne $script:SettingsProblem -and -not $Explicit) {
+        Write-TraceLine "settings: not saved, $($script:Paths.Settings) is damaged"
+        return $false
+    }
     try {
+        if ($null -ne $script:SettingsProblem -and (Test-Path -LiteralPath $script:Paths.Settings -PathType Leaf)) {
+            $copy = Join-Path (Split-Path -Parent $script:Paths.Settings) ('settings.broken-{0:yyyyMMdd_HHmmss}.json' -f (Get-Date))
+            Copy-Item -LiteralPath $script:Paths.Settings -Destination $copy -ErrorAction Stop
+        }
         Write-JsonFile $script:Paths.Settings (ConvertTo-AiDnsSettingsDocument $Settings)
         $script:Settings = $Settings
         $script:SettingsProblem = $null

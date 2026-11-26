@@ -1,8 +1,12 @@
 # Logs written by the trace and dry-run copies in tests/manual.
 tests/manual/logs/
 
+# Recorded manual test sessions; they contain details of the test machine.
+tests/manual/sessions/
+
 # Personal settings saved by AI-DNS-Settings.bat, and release archives built by tools/Build-Release.ps1.
 settings.json
+settings.broken-*.json
 dist/
 
 # Pester and editor output.

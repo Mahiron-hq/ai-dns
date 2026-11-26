@@ -29,6 +29,10 @@ function Test-PublicIPv4 {
     return $true
 }
 
+function Test-InteractiveConsole {
+    try { return -not [Console]::IsInputRedirected } catch { return $false }
+}
+
 function Test-Hostname {
     param([AllowNull()] [AllowEmptyString()] [string] $Name)
     return (-not [string]::IsNullOrEmpty($Name)) -and ($Name -cmatch $script:HostnamePattern)

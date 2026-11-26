@@ -14,14 +14,16 @@
     runs Enable with freshly downloaded provider lists. Status shows the current configuration and
     checks every service without changing anything. Settings opens the interactive settings menu.
 
-    Enable, Disable and Update relaunch themselves through the UAC prompt when not elevated. Before
-    that they mention a new release once, unless that is switched off in the settings.
+    Enable, Disable and Update relaunch themselves through the UAC prompt when not elevated; a
+    test-only Enable does not. Before that they mention a new release once, unless that is switched
+    off in the settings.
 
 .PARAMETER Action
     Enable, Disable, Update, Status or Settings.
 
 .PARAMETER TestOnly
-    Enable only: rank the resolvers and stop without changing anything.
+    Enable only: rank the resolvers and stop without changing or writing anything. Needs no
+    administrator rights.
 
 .PARAMETER DryRun
     Perform every check but only log the changes instead of making them.
@@ -105,11 +107,12 @@ if ($PSBoundParameters.ContainsKey('LogDirectory')) {
 
 # Shown here, before elevation, so the release page opens in the user's own browser session.
 if ($Action -ne 'Status' -and -not $NoUpdateCheck) {
-    Invoke-AiDnsVersionCheck -Language $Language
+    $readOnly = $DryRun -or -not (Test-AiDnsElevationNeeded -Action $Action -TestOnly:$TestOnly)
+    Invoke-AiDnsVersionCheck -Language $Language -ReadOnly:$readOnly
     $PSBoundParameters['NoUpdateCheck'] = [switch]::Present
 }
 
-if ($Action -ne 'Status' -and -not (Test-AiDnsElevation)) {
+if ((Test-AiDnsElevationNeeded -Action $Action -TestOnly:$TestOnly) -and -not (Test-AiDnsElevation)) {
     exit (Request-AiDnsElevation -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -Language $Language)
 }
 

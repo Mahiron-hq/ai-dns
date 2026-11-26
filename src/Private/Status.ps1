@@ -25,7 +25,7 @@ function Invoke-AiDnsStatus {
     foreach ($rule in @(Get-AiDnsNrptRule)) { Write-NoteLine 'Status.Route' (@($rule.Namespace) -join ', ') (@($rule.NameServers) -join ', ') }
 
     Write-StepLine 'Step.StatusCheck'
-    try { Initialize-ProbeEngine }
+    try { Initialize-ProbeEngine -InMemory }
     catch {
         Write-FailLine 'Prepare.EngineFailed' $_.Exception.Message
         return 1

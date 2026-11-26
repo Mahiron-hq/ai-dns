@@ -69,41 +69,50 @@ function Invoke-AiDnsDisable {
     if ($null -ne $backup) { Write-OkLine 'Disable.BackupFound' $backup.Created } else { Write-WarnLine 'Disable.NoBackup' }
     $records = @()
     if ($null -ne $backup) { $records = @($backup.Adapters) }
+    $stateServers = if ($null -ne $state) { [string[]]@($state.Servers) } else { [string[]]@() }
 
     Write-StepLine 'Step.Adapters'
     $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
-    $done = [Collections.Generic.List[string]]::new()
+    $leftAlone = [Collections.Generic.List[string]]::new()
     $adapterChanges = 0
+    $fullHint = $false
     foreach ($record in $records) {
-        $nic = @($adapters | Where-Object { $_.InterfaceGuid -eq $record.Guid }) | Select-Object -First 1
-        if ($null -eq $nic) {
+        if ($null -eq (@($adapters | Where-Object { $_.InterfaceGuid -eq $record.Guid }) | Select-Object -First 1)) {
             Write-NoteLine 'Disable.AdapterMissing' $record.Name
+        }
+    }
+    foreach ($nic in $adapters) {
+        $guid = [string]$nic.InterfaceGuid
+        $record = @($records | Where-Object { $_.Guid -eq $guid }) | Select-Object -First 1
+        $current = [string[]]@(Get-AdapterDnsServer $nic.ifIndex)
+        $action = Get-AdapterRollbackAction -Record $record -Current $current -StateServers $stateServers -Known $known `
+            -HasBackup:($null -ne $backup) -Full:$Full
+        if ($action -eq 'None') { continue }
+        if ($action -eq 'Changed') {
+            Write-NoteLine 'Adapter.Changed' $nic.Name (Format-AddressList $current)
+            $leftAlone.Add($guid)
             continue
         }
-        $static = [string[]]@(@(ConvertTo-AddressList $record.StaticV4) + @(ConvertTo-AddressList $record.StaticV6) |
-            Where-Object { $known -notcontains $_ })
-        if ($Full) { $static = [string[]]@() }
+        if ($action -eq 'NotOurs') {
+            Write-WarnLine 'Adapter.NotOurs' $nic.Name (Format-AddressList $current)
+            $leftAlone.Add($guid)
+            $fullHint = $true
+            continue
+        }
+        $static = [string[]]@()
+        if ($action -eq 'Restore' -and -not $Full) {
+            $static = [string[]]@(@(ConvertTo-AddressList $record.StaticV4) + @(ConvertTo-AddressList $record.StaticV6))
+        }
         try {
             Restore-AdapterDnsServer $nic.ifIndex $nic.Name $static
             if ($static.Count) { Write-OkLine 'Disable.AdapterStatic' $nic.Name ($static -join ', ') }
+            elseif ($action -eq 'Reset') { Write-OkLine 'Disable.AdapterReset' $nic.Name ($current -join ', ') }
             else { Write-OkLine 'Disable.AdapterDhcp' $nic.Name }
-            $done.Add([string]$nic.InterfaceGuid)
             $adapterChanges++
         }
         catch { Write-FailLine 'Adapter.Failed' $nic.Name $_.Exception.Message }
     }
-    foreach ($nic in $adapters) {
-        if ($done.Contains([string]$nic.InterfaceGuid)) { continue }
-        $current = @(Get-AdapterDnsServer $nic.ifIndex)
-        $ours = @($current | Where-Object { $known -contains $_ }).Count -gt 0
-        if (-not $ours -and -not ($Full -and $current.Count -gt 0)) { continue }
-        try {
-            Restore-AdapterDnsServer $nic.ifIndex $nic.Name
-            Write-OkLine 'Disable.AdapterReset' $nic.Name ($current -join ', ')
-            $adapterChanges++
-        }
-        catch { Write-FailLine 'Adapter.Failed' $nic.Name $_.Exception.Message }
-    }
+    if ($fullHint) { Write-NoteLine 'Disable.FullHint' }
 
     $ipv6Hint = $false
     foreach ($nic in $adapters) {
@@ -138,15 +147,8 @@ function Invoke-AiDnsDisable {
 
     if (Test-DohSupport) {
         Write-StepLine 'Step.Doh'
-        $entries = @(Get-DohTemplateEntry | Where-Object { $known -contains $_.ServerAddress })
-        foreach ($entry in $entries) {
-            try {
-                Remove-DohTemplate $entry.ServerAddress
-                Write-OkLine 'Disable.DohRemoved' $entry.ServerAddress
-            }
-            catch { Write-FailLine 'Disable.DohFailed' $entry.ServerAddress $_.Exception.Message }
-        }
-        if ($entries.Count -eq 0) { Write-OkLine 'Disable.DohNone' }
+        $removed = Remove-OwnedDohTemplate -Owned (Get-OwnedDohRecord $backup $state) -Known $known
+        if ($removed -eq 0) { Write-OkLine 'Disable.DohNone' }
     }
 
     Write-StepLine 'Step.Policies'
@@ -195,7 +197,7 @@ function Invoke-AiDnsDisable {
     $remaining = 0
     foreach ($c in @(Get-NetworkConnection)) {
         $current = @(Get-AdapterDnsServer $c.Index)
-        if (@($current | Where-Object { $known -contains $_ }).Count -gt 0) {
+        if (-not $leftAlone.Contains($c.Guid) -and @($current | Where-Object { $known -contains $_ }).Count -gt 0) {
             $remaining++
             Write-WarnLine 'Disable.Remaining' $c.Alias ($current -join ', ')
         }

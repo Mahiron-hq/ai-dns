@@ -1,6 +1,6 @@
 @{
     RootModule           = 'AIDNS.psm1'
-    ModuleVersion        = '3.1.0'
+    ModuleVersion        = '3.1.1'
     GUID                 = '4f6c2a51-8f0e-4b8a-9a43-2d7f3c1e9b60'
     Author               = 'Lev Burmistrov'
     CompanyName          = 'Mahiron-hq'
@@ -9,7 +9,7 @@
     PowerShellVersion    = '5.1'
     CompatiblePSEditions = @('Desktop')
     FunctionsToExport    = @('Invoke-AiDns', 'Test-AiDnsElevation', 'Request-AiDnsElevation', 'Wait-AiDnsExit',
-                             'Invoke-AiDnsVersionCheck', 'Start-AiDnsSettingsMenu')
+                             'Invoke-AiDnsVersionCheck', 'Start-AiDnsSettingsMenu', 'Test-AiDnsElevationNeeded')
     CmdletsToExport      = @()
     VariablesToExport    = @()
     AliasesToExport      = @()

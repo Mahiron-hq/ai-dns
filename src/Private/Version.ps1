@@ -65,9 +65,11 @@ function Test-NewerRelease {
     to open its page. Whatever the answer, that release is never announced again.
 .PARAMETER Language
     UI language of the notice.
+.PARAMETER ReadOnly
+    Do not save the time of the check or the announced version, for runs that must write nothing.
 #>
 function Invoke-AiDnsVersionCheck {
-    param([ValidateSet('Auto', 'en', 'ru')] [string] $Language = 'Auto')
+    param([ValidateSet('Auto', 'en', 'ru')] [string] $Language = 'Auto', [switch] $ReadOnly)
 
     $settings = Get-AiDnsSetting
     if (-not $settings.CheckUpdates) { return }
@@ -98,5 +100,5 @@ function Invoke-AiDnsVersionCheck {
         }
         $settings.DismissedVersion = $release.Version.ToString()
     }
-    $null = Save-AiDnsSetting $settings
+    if (-not $ReadOnly) { $null = Save-AiDnsSetting $settings }
 }
