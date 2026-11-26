@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Builds the release archive dist\ai-dns-<version>.zip and its SHA-256 checksum file.
+    Builds the release archive dist\ai-dns-<version>-windows.zip and dist\SHA256SUMS.txt.
 
 .DESCRIPTION
     The archive contains only what is needed to run AI-DNS: the four launchers, AI-DNS.ps1, src\,
@@ -28,7 +28,7 @@ $paths = @('AI-DNS-Enable.bat', 'AI-DNS-Disable.bat', 'AI-DNS-Update.bat', 'AI-D
 
 $files = @(& git -C $root ls-files -- @paths)
 if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) { throw 'git ls-files failed; run this from a clone of the repository.' }
-$dirty = @(& git -C $root status --porcelain -- @paths)
+$dirty = @(& git -C $root status --porcelain -- @paths 'tools/release/README.txt')
 if ($dirty.Count -gt 0) { throw "Commit these changes first:`n$($dirty -join "`n")" }
 $stamp = [DateTimeOffset]::FromUnixTimeSeconds([long](& git -C $root log -1 --format=%ct))
 
@@ -36,7 +36,8 @@ $readme = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'release\README.txt'))
 $readme = $readme -replace "`r?`n", "`r`n"
 
 $null = New-Item -ItemType Directory -Path $OutputDirectory -Force
-$zipPath = Join-Path $OutputDirectory "$name.zip"
+$zipName = "$name-windows.zip"
+$zipPath = Join-Path $OutputDirectory $zipName
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
@@ -61,8 +62,8 @@ try {
 finally { $archive.Dispose() }
 
 $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$checksum = "$zipPath.sha256"
-[IO.File]::WriteAllText($checksum, "$hash  $name.zip`n", [Text.UTF8Encoding]::new($false))
+$checksum = Join-Path $OutputDirectory 'SHA256SUMS.txt'
+[IO.File]::WriteAllText($checksum, "$hash  $zipName`n", [Text.UTF8Encoding]::new($false))
 
 Write-Host "$zipPath ($([math]::Round((Get-Item -LiteralPath $zipPath).Length / 1KB)) KB, $($files.Count + 1) files)"
 Write-Host "SHA-256 $hash"

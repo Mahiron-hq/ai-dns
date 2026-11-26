@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [3.1.1] - 2026-11-26
+
+### Fixed
+
+- The first Enable failed to apply any browser policy with "Cannot bind argument to parameter
+  'Records' because it is an empty collection" and finished with eight errors (#1).
+- Disable removed browser policies, DoH templates and adapter DNS servers that only looked like
+  the ones AI-DNS sets. It now reverts only what AI-DNS recorded as its own, leaves settings that
+  were changed after Enable, and reports the rest. The same applies when Enable puts back an
+  adapter after a failed search.
+- A mixed static DNS list (an AI-DNS address next to another server) was saved as empty, so
+  Disable could not restore the other server.
+- A damaged backup.json was replaced by a new one, losing the original settings. Enable now stops
+  before changing anything and keeps the damaged file aside if you choose to continue.
+- A damaged settings.json was overwritten with defaults by the next update check. It is no longer
+  written until a setting is changed in the menu, and a copy of the damaged file is kept then.
+- An out-of-range waitSeconds in settings.json stopped every action with an unhandled error, and a
+  fractional one was rounded.
+- Enable removed AI-DNS NRPT rules even with NRPT switched off in the settings.
+- -TestOnly asked for administrator rights and wrote logs, caches and the data directory. It now
+  runs without elevation and writes nothing; -DryRun writes only its log. Status, run as
+  administrator, no longer creates the data directory to cache the compiled engine.
+
+### Changed
+
+- The release archive is named `ai-dns-<version>-windows.zip`, and its checksum is in
+  `SHA256SUMS.txt`.
+
 ## [3.1.0] - 2026-10-22
 
 ### Added
@@ -84,5 +112,6 @@ All notable changes to this project are documented here. The format follows
 Machines enabled by 2.x can be rolled back by 3.0: the backup format is read as before. IPv6 that
 2.x left disabled is reported, and `-EnableIPv6` turns it back on.
 
+[3.1.1]: https://github.com/Mahiron-hq/ai-dns/releases/tag/v3.1.1
 [3.1.0]: https://github.com/Mahiron-hq/ai-dns/releases/tag/v3.1.0
 [3.0.0]: https://github.com/Mahiron-hq/ai-dns/tree/c771289
